@@ -7,6 +7,7 @@ llk-agent/data/audit.jsonl
 llk-agent/data/report-*.json
 llk-agent/data/verification-recording.json
 llk-agent/data/verification-scan-recording.json
+llk-agent/data/navigation-*.json
 llk-agent/data/template-history/
 llk-agent/data/personal-template-history/
 llk-agent/data/employees.json

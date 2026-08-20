@@ -31,6 +31,9 @@ const sensitiveKeys = /password|cookie|csrf|token|secret|authorization/i;
 const locks = new Set();
 let stagedRoster;
 const stagedPersonal = new Map();
+const operationProgress=new Map();
+function progress(id,stage,message,detail={}){const current=operationProgress.get(id)||{sequence:0,events:[]};const event={sequence:++current.sequence,at:new Date().toISOString(),stage,message,...sanitize(detail)};current.events.push(event);if(current.events.length>100)current.events.shift();current.active=!['complete','error'].includes(stage);current.latest=event;operationProgress.set(id,current);return event;}
+function progressState(id,since=0){const current=operationProgress.get(id)||{sequence:0,events:[],active:false,latest:null};return {active:current.active,sequence:current.sequence,latest:current.latest,events:current.events.filter(event=>event.sequence>since)};}
 async function getSettings() {
   if (existsSync(settingsFile)) {
     try { return await readJson(settingsFile); } catch {}
@@ -47,6 +50,7 @@ const loginFlows = new Map();
 const sessionCookies = new Map();
 let verificationRecording = null;
 let verificationScanRecording = null;
+let navigationRecording = null;
 const LOGIN_FLOW_TTL = 10 * 60_000;
 const ROSTER_URLS = [
   'https://pn-natuna.go.id/profil-pengadilan/profil-hakim',
@@ -120,7 +124,12 @@ function normalizeOfficialDate(value) {
   match = text.match(/^(\d{1,2})\s+([a-z]+)\s+(\d{4})$/);
   return match && months[match[2]] ? `${match[3]}-${String(months[match[2]]).padStart(2, '0')}-${match[1].padStart(2, '0')}` : null;
 }
-async function getEmployees() { const value = await readJson(employeeFile); if (!Array.isArray(value)) throw new Error('Data pegawai rusak'); return value; }
+async function getEmployees() {
+  if (!existsSync(employeeFile)) return [];
+  const value = await readJson(employeeFile);
+  if (!Array.isArray(value)) throw new Error('Data pegawai rusak');
+  return value;
+}
 async function findEmployee(id) { const employee = (await getEmployees()).find(e => e.id === id); if (!employee) throw new HttpError(404, 'Pegawai tidak ditemukan'); return employee; }
 async function withLock(id, task) {
   if (locks.has(id) || loginFlows.has(id)) throw new HttpError(409, 'Operasi pegawai sedang berjalan');
@@ -140,14 +149,17 @@ async function ensurePasswordManagerPrefs(dir) {
   if (prefs.autofill.credit_card_enabled !== true) { prefs.autofill.credit_card_enabled = true; changed = true; }
   if (changed) await saveJson(prefFile, prefs);
 }
-
+const sessionCookieFile=id=>join(profilePath(id),'session-cookies.json');
+async function storeSessionCookies(id,cookies){sessionCookies.set(id,cookies);await mkdir(profilePath(id),{recursive:true});await saveJson(sessionCookieFile(id),cookies);}
+async function loadSessionCookies(id){if(sessionCookies.has(id))return sessionCookies.get(id);if(existsSync(sessionCookieFile(id))){try{const cookies=await readJson(sessionCookieFile(id));sessionCookies.set(id,cookies);return cookies;}catch{}}return [];}
 async function launchEmployee(id, headless = true) {
   const employee = await findEmployee(id), dir = profilePath(id);
   await mkdir(dir, { recursive: true });
   if (!headless) await ensurePasswordManagerPrefs(dir);
-  const options = { channel: 'msedge', headless, viewport: headless ? { width: 1365, height: 768 } : null };
-  const context = await chromium.launchPersistentContext(dir, options);
-  const cookies = sessionCookies.get(id);
+  let context;
+  if(headless){const browser=await chromium.launch({channel:'msedge',headless:true});context=await browser.newContext({viewport:{width:1365,height:768}});context.on('close',()=>browser.close().catch(()=>{}));}
+  else context=await chromium.launchPersistentContext(dir,{channel:'msedge',headless:false,viewport:null});
+  const cookies = await loadSessionCookies(id);
   if (cookies?.length) await context.addCookies(cookies);
   return { employee, context };
 }
@@ -182,13 +194,15 @@ async function verifyLogin(id) {
     return { loggedIn: true, stage: 'authenticated-root' };
   } finally { await context.close(); }
 }
-async function generatePreview(employee, start, end) {
+async function generatePreview(employee, start, end, department) {
   if (!employee) throw new HttpError(404, 'Pegawai tidak ditemukan');
   const personal = await readPersonal(employee.id), stored = await readJson(templateFile), templates = stored.departments || stored;
-  const activities = personal?.activities?.length ? personal.activities : templates[employee.department]?.activities;
+  const selectedDepartment = clean(department) || employee.department;
+  if (!templates[selectedDepartment]) bad('Template bagian tidak tersedia');
+  const activities = selectedDepartment === employee.department && personal?.activities?.length ? personal.activities : templates[selectedDepartment].activities;
   if (!activities?.length) bad('Template jabatan/bagian belum tersedia');
   let index = 0;
-  return (await workdays(start, end)).map(day => { const first = activities[index++ % activities.length], second = activities[index++ % activities.length], friday = day.dow === 5; const item=a=>({description:a.nama,type:a.kategori||'Pendukung',result:a.result||'Selesai',...(a.output?{output:a.output}:{})}); return { date: day.iso, supervisor: employee.supervisor, items: [
+  return (await workdays(start, end)).map(day => { const first = activities[index++ % activities.length], second = activities[index++ % activities.length], friday = day.dow === 5; const item=a=>({description:a.nama,type:a.kategori||'Pendukung',result:a.result||a.keterangan||'Selesai',...(a.output?{output:a.output}:{})}); return { date: day.iso, supervisor: employee.supervisor, items: [
     {...item(first),start:first.start||'08:00',end:first.end||'12:00'},
     { start:'12:00', end:friday ? '13:30':'13:00', description:'Istirahat', type:'Pendukung', result:'Selesai' },
     {...item(second),start:second.start||(friday?'13:30':'13:00'),end:second.end||(friday?'17:00':'16:30')}
@@ -201,8 +215,8 @@ async function validatePreview(preview) {
   return preview.map((day, dayIndex) => {
     if (!day || typeof day !== 'object' || seen.has(day.date)) bad('Tanggal preview duplikat atau tidak valid'); seen.add(day.date);
     const date = parseDate(day.date), iso = localIso(date), dow = date.getDay();
-    if (!dow || dow === 6 || holidays.has(iso) || date > parseDate(localIso(new Date()))) bad(`Tanggal ${day.date} bukan hari kerja yang diizinkan`);
-    if (!Array.isArray(day.items) || !day.items.length || day.items.length > 20) bad(`Kegiatan ${day.date} tidak valid`);
+    if (iso !== day.date || dow === 0 || dow === 6 || holidays.has(iso)) bad(`Tanggal ${day.date} bukan hari kerja`);
+    if (!Array.isArray(day.items) || !day.items.length || day.items.length > 12) bad(`Kegiatan ${day.date} tidak valid`);
     const close = dow === 5 ? 17 * 60 : 16 * 60 + 30; let cursor = 8 * 60;
     const items = day.items.map((item, itemIndex) => {
       if (!item || typeof item !== 'object') bad(`Baris ${itemIndex + 1} tidak valid`);
@@ -222,7 +236,18 @@ function authenticatedLlkPage(context){return context.pages().find(page=>llkLoca
 async function requireAuthenticatedLlkPage(context){const page=authenticatedLlkPage(context);if(page)return page;const pages=await pageDiagnostics(context);throw new HttpError(401,`Login LLK belum terdeteksi. Halaman aktif: ${pages.map(({origin,pathname})=>`${origin}${pathname}`).join(', ')||'(tidak ada)'}`);}
 async function discoverLlkRoutes(page){return page.evaluate(base=>{const normalize=value=>String(value||'').replace(/\s+/g,' ').trim().toLowerCase();const routes=[];for(const element of document.querySelectorAll('a[href],form[action]')){try{const url=new URL(element.getAttribute('href')||element.getAttribute('action'),location.href);if(url.origin!==base)continue;routes.push({url:url.href,label:normalize(`${element.textContent||''} ${element.getAttribute('title')||''} ${element.getAttribute('aria-label')||''} ${url.pathname}`)});}catch{}}return routes;},LLK_BASE);}
 function discoveredRoute(routes,patterns){return routes.find(route=>patterns.some(pattern=>pattern.test(route.label)))?.url||null;}
-async function navigateFeature(page,url){if(!url)return {available:false,reason:'route-missing'};await page.goto(url,{waitUntil:'domcontentloaded'});const location=llkLocation(page.url());if(!location.sameOrigin||!location.authenticated)throw new HttpError(401,'Sesi LLK kedaluwarsa; login ulang diperlukan');return location.url.href===url||location.url.pathname===new URL(url).pathname?{available:true}:{available:false,reason:'llk-redirect'};}
+async function navigateFeature(page,url){
+  if(!url)return {available:false,reason:'route-missing'};
+  try { await page.goto(url,{waitUntil:'domcontentloaded'}); }
+  catch(error) {
+    if(!/ERR_ABORTED|Navigation interrupted/i.test(error?.message||''))throw error;
+    await page.waitForLoadState('domcontentloaded').catch(()=>{});
+  }
+  const location=llkLocation(page.url());
+  if(!location.sameOrigin||!location.authenticated)throw new HttpError(401,'Sesi LLK kedaluwarsa; login ulang diperlukan');
+  const target=new URL(url);
+  return location.url.pathname===target.pathname||location.url.href===target.href?{available:true}:{available:false,reason:'llk-redirect'};
+}
 
 async function scrapeEntries(context, existingPage) {
   const page = existingPage || await context.newPage(), owned = !existingPage;
@@ -231,51 +256,51 @@ async function scrapeEntries(context, existingPage) {
       await page.goto(LLK_BASE, { waitUntil: 'domcontentloaded' });
       if (!llkLocation(page.url()).authenticated) throw new HttpError(401, 'Sesi LLK kedaluwarsa; login ulang diperlukan');
     }
-    const routes = await discoverLlkRoutes(page);
-    const historyUrl = discoveredRoute(routes, [/\b(?:riwayat|histori|history)\b/, /\bllk\b/, /kegiatan/]);
-    const navigation = await navigateFeature(page, historyUrl);
-    if (!navigation.available) {
+    const llkMenu = page.locator('a[href="/llk"], a[href="https://llk.mahkamahagung.go.id/llk"]').first();
+    if (!await llkMenu.count()) {
       const empty = [];
       empty.available = false;
-      empty.warning = 'Riwayat LLK tidak tersedia dari halaman akun ini.';
+      empty.warning = 'Menu LLK tidak ditemukan pada halaman akun aktif.';
       return empty;
     }
-    const entries = [];
-    for (let pageNum = 1; pageNum <= 100; pageNum++) {
-      if (pageNum > 1) {
-        const link = page.locator(`ul.pagination a[data-ci-pagination-page="${pageNum}"]`).first();
-        if (!await link.count()) break;
-        await link.click();
-        await page.waitForLoadState('networkidle');
-      }
-      entries.push(...await page.evaluate(() => {
-        const cleanText = value => String(value || '').replace(/\s+/g, ' ').trim();
-        const output = [];
-        for (const outerRow of document.querySelectorAll('table > tbody > tr')) {
-          const outerText = cleanText(outerRow.textContent);
-          const rawDate = (outerText.match(/Tanggal Kegiatan:\s*([^,]+)/i) || [])[1] || '';
-          const nestedRows = outerRow.querySelectorAll('table tbody tr');
-          for (const row of nestedRows) {
-            const cells = [...row.children].filter(cell => cell.tagName === 'TD').map(cell => cleanText(cell.textContent));
-            if (cells.length < 6) continue;
-            const times = cells.find(value => /\b(?:[01]\d|2[0-3]):[0-5]\d\s*-\s*(?:[01]\d|2[0-3]):[0-5]\d\b/.test(value))?.match(/\b(?:[01]\d|2[0-3]):[0-5]\d\b/g) || [];
-            const typeIndex = cells.findIndex(value => /^(Utama|Pendukung|primary|support)$/i.test(value));
-            if (times.length < 2 || typeIndex < 1) continue;
-            output.push({
-              rawDate,
-              start: times[0],
-              end: times[1],
-              description: cells[typeIndex - 1],
-              type: cells[typeIndex],
-              result: cells[typeIndex + 1] || ''
-            });
-          }
-        }
-        return output;
-      }));
+    const targetHref = await llkMenu.getAttribute('href');
+    await llkMenu.click();
+    await page.waitForURL(url => url.origin === LLK_BASE && /\/llk(?:\/|$|\?)/i.test(url.pathname + url.search), { timeout: 15000 }).catch(() => {});
+    await page.waitForLoadState('domcontentloaded').catch(() => {});
+    await page.locator('table').first().waitFor({ state: 'visible', timeout: 15000 }).catch(() => {});
+    if (!/\/llk(?:\/|$)/i.test(new URL(page.url()).pathname)) {
+      const empty = [];
+      empty.available = false;
+      empty.warning = `Klik menu LLK tidak membuka daftar LLK${targetHref ? ` (${targetHref})` : ''}.`;
+      return empty;
     }
+    const sourceUrl = page.url();
+    const entries = await page.evaluate(() => {
+      const cleanText = value => String(value || '').replace(/\s+/g, ' ').trim();
+      const output = [];
+      const outerTable = Array.from(document.querySelectorAll('table')).find(table => Array.from(table.tBodies[0]?.rows || []).some(row => Array.from(row.cells || []).some(cell => cell.querySelector('table'))));
+      if (!outerTable) return output;
+      for (const outerRow of Array.from(outerTable.tBodies[0]?.rows || [])) {
+        const detailCell = Array.from(outerRow.cells).find(cell => cell.querySelector('table'));
+        const nestedTable = detailCell?.querySelector('table');
+        if (!detailCell || !nestedTable) continue;
+        const headerText = cleanText(detailCell.querySelector('div')?.textContent || '');
+        const rawDate = (headerText.match(/Tanggal Kegiatan\s*:\s*([^,]+)/i) || [])[1] || '';
+        for (const row of Array.from(nestedTable.tBodies[0]?.rows || [])) {
+          const cells = Array.from(row.cells).map(cell => cleanText(cell.textContent));
+          if (cells.length < 6) continue;
+          const times = cells[1]?.match(/\b(?:[01]\d|2[0-3]):[0-5]\d\b/g) || [];
+          if (times.length < 2 || !cells[3] || /^istirahat$/i.test(cells[3])) continue;
+          output.push({rawDate,start:times[0],end:times[1],description:cells[3],type:/^(Utama|Pendukung)$/i.test(cells[4])?cells[4]:'Pendukung',result:cells[5]||'Selesai'});
+        }
+      }
+      return output;
+    });
     const normalized = entries.map(entry => ({ ...entry, date: normalizeOfficialDate(entry.rawDate) })).filter(entry => entry.date);
+    normalized.sort((a,b) => b.date.localeCompare(a.date));
     normalized.available = true;
+    normalized.sourceUrl = sourceUrl;
+    normalized.pagesScanned = 1;
     return normalized;
   } finally {
     if (owned) await page.close();
@@ -418,13 +443,13 @@ async function applyTemplates(input,actor){const current=await templateSnapshot(
 async function readPersonal(id){return existsSync(personalFile(id))?sanitize(await readJson(personalFile(id))):null;}
 function validatePersonal(value,id){if(!value||typeof value!=='object'||value.employeeId!==id||!Array.isArray(value.activities)||value.activities.length>1000)bad('Template pribadi tidak valid');const activities=value.activities.map(a=>{const nama=clean(a?.nama),kategori=clean(a?.kategori)||'Pendukung';if(!nama||/^istirahat$/i.test(nama)||!['Utama','Pendukung'].includes(kategori))bad('Kegiatan template pribadi tidak valid');const out={nama,kategori};for(const key of ['start','end','result','output'])if(clean(a[key]))out[key]=clean(a[key]);return out;});return {...sanitize(value),employeeId:id,activities};}
 async function personalResponse(employee){const personal=await readPersonal(employee.id),stored=await readJson(templateFile),departments=stored.departments||stored,fallback=departments[employee.department];return {source:personal?.activities?.length?'personal':'department',personal,activities:personal?.activities?.length?personal.activities:(fallback?.activities||[]),fallbackLabel:fallback?.label||employee.department};}
-async function importPersonal(id, existingContext, existingPage, limit = 10){
+async function importPersonal(id, existingContext, existingPage){
   const employee=await findEmployee(id),owned=!existingContext,{context}=existingContext?{context:existingContext}:await launchEmployee(id);
   try {
     const entries=await scrapeEntries(context,existingPage),current=await readPersonal(id);
     if(entries.available===false)return {available:false,current,candidate:null,warning:entries.warning||'Tahap riwayat: data LLK tidak tersedia; template pribadi tidak diubah.'};
-    const seen=new Map(), recentList = Array.isArray(entries) ? entries.slice(0, Number(limit) || 10) : [];
-    for(const entry of recentList){
+    const seen=new Map(), allEntries=Array.isArray(entries)?entries:[];
+    for(const entry of allEntries){
       const nama=clean(entry.description);
       if(!nama||/^istirahat$/i.test(nama))continue;
       const activity={nama,kategori:/^(Utama|Pendukung)$/i.test(entry.type)?clean(entry.type):'Pendukung'};
@@ -434,10 +459,11 @@ async function importPersonal(id, existingContext, existingPage, limit = 10){
       else {const item=seen.get(key);item.occurrences+=1;if(entry.date&&(!item.lastSeen||entry.date>item.lastSeen))item.lastSeen=entry.date;}
     }
     const activities=[...seen.values()].sort((a,b)=>b.occurrences-a.occurrences||a.nama.localeCompare(b.nama,'id-ID')).map(({occurrences,lastSeen,...item})=>item);
+    if(!activities.length)return {available:false,current,candidate:null,warning:'Daftar LLK ditemukan, tetapi tidak ada kegiatan yang dapat dibaca. Template personal tidak diubah.'};
     const candidate={version:1,updatedAt:new Date().toISOString(),employeeId:id,activities};
     const stageToken=randomBytes(16).toString('hex'),digest=createHash('sha256').update(canonical(candidate)).digest('hex');
     stagedPersonal.set(id,{stageToken,token:stageToken,digest,candidate,expires:Date.now()+15*60*1000});
-    return {available:true,current,candidate,activities,stageToken,digest,diff:{added:activities.length,modified:0,removed:current?.activities?.length||0}};
+    return {available:true,current,candidate,activities,scannedEntries:allEntries.length,pagesScanned:entries.pagesScanned||1,sourceUrl:entries.sourceUrl||null,stageToken,digest,diff:{added:activities.length,modified:0,removed:current?.activities?.length||0}};
   } finally {if(owned)await context.close();}
 }
 async function enrichEmployeeFromSso(employee, page) {
@@ -519,11 +545,10 @@ async function completeExternalBootstrap(tempId,tempEmployee,context) {
   const enriched=await enrichEmployeeFromSso(placeholder,page);
   const history=await importPersonal(actualNip,context,page);
   if(history?.candidate)await saveJson(personalFile(actualNip),history.candidate);
-  sessionCookies.set(actualNip, await context.cookies([LLK_BASE]));
-  await context.close();
-  const oldDir=profilePath(tempId),newDir=profilePath(actualNip);
-  await moveBrowserProfile(oldDir,newDir);
-  return {employee:enriched,verifier,history};
+  await storeSessionCookies(actualNip,await context.cookies([LLK_BASE]));
+  const flow=loginFlows.get(tempId);
+  if(flow){flow.employee=enriched;flow.actualNip=actualNip;flow.fetchedAt=new Date().toISOString();}
+  return {employee:enriched,verifier,history,sessionActive:true,tempId};
 }
 
 function normalizedIdentity(value){return clean(value).toLocaleLowerCase('id-ID');}
@@ -535,7 +560,7 @@ async function completeLogin(id){
   if(expectedNip){if(actualNip!==expectedNip)throw new HttpError(401,'Identitas akun SSO tidak cocok dengan NIP pegawai terpilih');}
   else {if(normalizedIdentity(verifier.verifier.name)!==normalizedIdentity(flow.employee.name))throw new HttpError(401,'Identitas akun SSO tidak cocok dengan nama pegawai terpilih');warnings.push('Pegawai Ad-Hoc tanpa NIP dicocokkan berdasarkan nama lengkap persis. Pastikan identitas benar sebelum melanjutkan.');}
   const history=await importPersonal(id,flow.context,page);if(history.warning)warnings.push(history.warning);
-  sessionCookies.set(id, await flow.context.cookies([LLK_BASE]));
+  await storeSessionCookies(id,await flow.context.cookies([LLK_BASE]));
   await closeLoginFlow(id,flow);
   return {active:false,authenticated:true,stage:'complete',identity:verifier.verifier,employee,warning:warnings.join(' ')||null,warnings,verifier,history,autoApplied:false};
 }
@@ -563,42 +588,136 @@ async function finishVerificationRecording() {
   const forms=await page.evaluate(()=>[...document.forms].map(form=>({action:form.action,method:(form.method||'get').toUpperCase(),fields:[...form.elements].map(field=>({name:field.name,type:field.type,tag:field.tagName.toLowerCase(),value:/password|token|csrf/i.test(field.name)?'':String(field.value||'').slice(0,200)})).filter(field=>field.name)})));
   const result={employeeId:employee.id,startedAt,finishedAt:new Date().toISOString(),url:page.url(),customMessage,title:clean(await page.title().catch(()=>'')),requests,forms};
   context.off('request',capture);
-  sessionCookies.set(employee.id,await context.cookies([LLK_BASE]));
+  await storeSessionCookies(employee.id,await context.cookies([LLK_BASE]));
   await saveJson(verificationRecordingFile,sanitize(result));
   await context.close();
   verificationRecording=null;
   await audit('verification.record',employee.id,{customMessage,url:result.url,requestCount:requests.length,formCount:forms.length},{result:'recorded'});
   return {url:result.url,requestCount:requests.length,formCount:forms.length};
 }
-async function verificationTargets(id) {
-  const {context}=await launchEmployee(id);
+async function verificationTargets(id, existingContext, extractIds = true) {
+  const owned=!existingContext,{context}=existingContext?{context:existingContext}:await launchEmployee(id);
+  progress(id,'launch','Membuka browser headless dan memuat sesi LLK…');
   try {
-    const page=await context.newPage();
-    const filteredUrl=new URL(`${LLK_BASE}/verifikasi`);
-    for(const [key,value] of Object.entries({start_date:'',end_date:'',status:'1',by:'nip',q:''}))filteredUrl.searchParams.set(key,value);
-    await page.goto(filteredUrl.href,{waitUntil:'domcontentloaded'});
-    if(!llkLocation(page.url()).authenticated)throw new HttpError(401,'Sesi LLK kedaluwarsa; login ulang diperlukan');
-    const rows=await page.evaluate(()=>{
-      const text=node=>String(node?.textContent||'').replace(/\s+/g,' ').trim();
-      return [...document.querySelectorAll('table tbody > tr')].map(row=>({
-        editUrl:row.querySelector('a[href*="/verifikasi/edit?cid="]')?.href||'',
-        summary:text(row).slice(0,300)
-      })).filter(item=>item.editUrl);
-    });
-    if(!rows.length)return [];
-    const targets=[];
-    const editPage=await context.newPage();
-    for(const row of rows){
-      await editPage.goto(row.editUrl,{waitUntil:'domcontentloaded'});
-      const input=editPage.locator('input[name="hllk"]');
-      await input.waitFor({state:'attached',timeout:5000}).catch(()=>{});
-      const hllk=String(await input.inputValue().catch(()=>'')).trim();
-      if(/^\d+$/.test(hllk))targets.push({hllk,summary:row.summary});
+    const page=existingContext?(authenticatedLlkPage(context)??context.pages()[0]??await context.newPage()):await context.newPage();
+    if(!llkLocation(page.url()).authenticated){
+      await page.goto(LLK_BASE,{waitUntil:'domcontentloaded'});
+      if(!llkLocation(page.url()).authenticated)throw new HttpError(401,'Sesi LLK kedaluwarsa; login ulang diperlukan');
     }
-    await editPage.close().catch(()=>{});
-    if(!targets.length)throw new Error(`Ditemukan ${rows.length} baris di halaman 1, tetapi ID hllk gagal diekstraksi.`);
-    return [...new Map(targets.map(item=>[item.hllk,item])).values()];
-  } finally {await context.close();}
+    progress(id,'home','Beranda LLK aktif. Mencari menu Verifikasi LLK…',{url:page.url()});
+    const menu=page.locator('a[href="/verifikasi"], a[href="https://llk.mahkamahagung.go.id/verifikasi"]').first();
+    if(await menu.count()){
+      await menu.click();
+      await page.waitForURL(url=>url.origin===LLK_BASE&&/^\/verifikasi(?:\/|$)/i.test(url.pathname),{timeout:15000}).catch(()=>{});
+      await page.waitForLoadState('domcontentloaded').catch(()=>{});
+    }
+    progress(id,'verification','Halaman Verifikasi LLK terbuka. Menerapkan filter Belum Terverifikasi…',{url:page.url()});
+    if(!/^\/verifikasi(?:\/|$)/i.test(new URL(page.url()).pathname))throw new HttpError(401,`Menu Verifikasi LLK gagal dibuka; URL ${page.url()}`);
+    const statusControl=page.locator('input[name="status"][value="1"], select[name="status"]').first();
+    if(!await statusControl.count())throw new Error('Kontrol filter status verifikasi tidak ditemukan');
+    if(await statusControl.evaluate(node=>node.tagName==='SELECT'))await statusControl.selectOption('1');
+    else await statusControl.check({force:true});
+    const byControl=page.locator('input[name="by"][value="nip"], select[name="by"]').first();
+    if(await byControl.count()){
+      if(await byControl.evaluate(node=>node.tagName==='SELECT'))await byControl.selectOption('nip');
+      else await byControl.check({force:true});
+    }
+    progress(id,'filter','Filter status=1 dan pencarian berdasarkan NIP diterapkan. Menunggu hasil…',{url:page.url()});
+    const searchButton=page.locator('button,input[type="submit"]').filter({hasText:/Cari|Search/i}).first();
+    if(!await searchButton.count())throw new Error('Tombol Cari verifikasi tidak ditemukan');
+    await searchButton.click({noWaitAfter:true});
+    await page.waitForURL(url=>url.origin===LLK_BASE&&/^\/verifikasi(?:\/|$)/i.test(url.pathname)&&url.searchParams.get('status')==='1',{timeout:15000}).catch(()=>{});
+    await page.waitForLoadState('domcontentloaded',{timeout:15000}).catch(()=>{});
+    await page.locator('table').first().waitFor({state:'visible',timeout:15000}).catch(()=>{});
+    await page.waitForTimeout(750);
+    if(!llkLocation(page.url()).authenticated)throw new HttpError(401,'Sesi LLK kedaluwarsa; login ulang diperlukan');
+    const rows=[],visited=new Set();
+    for(let pageNum=1;pageNum<=100;pageNum++){
+      const currentUrl=page.url();
+      if(visited.has(currentUrl))break;
+      visited.add(currentUrl);
+      let pageRows;
+      progress(id,'page',`Memindai halaman verifikasi ${pageNum}…`,{page:pageNum,url:currentUrl});
+      for(let attempt=0;attempt<5;attempt++){
+        try{
+          pageRows=await page.evaluate(()=>{
+            const text=node=>String(node?.textContent||'').replace(/\s+/g,' ').trim();
+            return [...document.querySelectorAll('a[href*="/verifikasi/edit?cid="]')].map(link=>{
+              const outerRow=link.closest('tr'),detailCell=Array.from(outerRow?.cells||[]).find(cell=>cell.querySelector('table')),nested=detailCell?.querySelector('table');
+              const header=text(detailCell?.querySelector('div'));
+              const rawDate=(header.match(/Tanggal Kegiatan\s*:\s*([^,]+)/i)||[])[1]||'';
+              const activities=Array.from(nested?.tBodies[0]?.rows||[]).map(row=>{const cells=Array.from(row.cells||[]).map(text),times=(cells[1]||'').match(/\b(?:[01]\d|2[0-3]):[0-5]\d\b/g)||[];return {start:times[0]||'',end:times[1]||'',description:cells[3]||'',type:cells[4]||'',result:cells[5]||''};}).filter(item=>item.start&&item.end);
+              return {editUrl:link.href,summary:text(outerRow).slice(0,500),rawDate,activities};
+            });
+          });
+          break;
+        }catch(error){if(!/Execution context was destroyed|navigation/i.test(error.message)||attempt===4)throw error;await page.waitForTimeout(1000);}
+      }
+      rows.push(...(pageRows||[]));
+      const next=page.locator('ul.pagination li:not(.disabled):not(.active) a[rel="next"], ul.pagination li:not(.disabled):not(.active) a').filter({hasText:/^(?:Next|Berikut|›|»|\d+)$/i}).last();
+      if(!await next.count())break;
+      const href=await next.getAttribute('href');
+      if(!href||visited.has(new URL(href,page.url()).href))break;
+      await Promise.all([page.waitForLoadState('domcontentloaded').catch(()=>{}),next.click()]);
+    }
+    const uniqueRows=[...new Map(rows.map(row=>[row.editUrl,row])).values()];
+    const dateCounts=new Map();
+    progress(id,'validate',`Ditemukan ${uniqueRows.length} target. Memvalidasi tanggal, jam akhir, dan deskripsi…`,{rowsFound:uniqueRows.length,pagesScanned:visited.size});
+    for(const row of uniqueRows){
+      if(!row.rawDate)row.rawDate=(row.summary.match(/Tanggal Kegiatan\s*:\s*([^,]+)/i)||[])[1]||'';
+      row.date=normalizeOfficialDate(row.rawDate);
+      if(!row.activities?.length){const times=row.summary.match(/\b(?:[01]\d|2[0-3]):[0-5]\d\b/g)||[];row.activities=times.length>=2?[{start:times[0],end:times.at(-1),description:(row.summary.match(/\d+\s+[^\s]+\s+-\s+[^\s]+\s+\d+\s+(.+?)\s+(?:Utama|Pendukung)\b/i)||[])[1]||''}]:[];}
+      if(row.date)dateCounts.set(row.date,(dateCounts.get(row.date)||0)+1);
+    }
+    for(const row of uniqueRows){
+      const issues=[];
+      if(!row.date)issues.push('Tanggal kegiatan tidak terbaca');
+      else if(dateCounts.get(row.date)>1)issues.push(`Tanggal duplikat: ${row.date}`);
+      const end=row.activities?.at(-1)?.end||'';
+      const dow=row.date?parseDate(row.date).getDay():null,expectedEnd=dow===5?'17:00':dow>=1&&dow<=4?'16:30':null;
+      if(expectedEnd&&end!==expectedEnd)issues.push(`Jam akhir ${end||'tidak terbaca'}; seharusnya ${expectedEnd}`);
+      const work=row.activities?.filter(item=>!/^istirahat$/i.test(clean(item.description)))||[];
+      if(!work.length)issues.push('Deskripsi kegiatan tidak terbaca');
+      else if(work.some(item=>!clean(item.description)||clean(item.description).length<4))issues.push('Deskripsi kegiatan belum benar');
+      row.valid=issues.length===0;row.issues=issues;
+    }
+    const validRows=uniqueRows.filter(row=>row.valid);
+    const invalidRows=uniqueRows.filter(row=>!row.valid);
+    if(!extractIds){
+      const preview=uniqueRows.map(row=>({date:row.date,summary:row.summary,editUrl:row.editUrl,activities:row.activities,valid:row.valid,issues:row.issues}));
+      progress(id,'preview',`Validasi selesai: ${validRows.length} siap, ${invalidRows.length} belum benar.`,{validCount:validRows.length,invalidCount:invalidRows.length});
+      preview.pagesScanned=visited.size;preview.rowsFound=uniqueRows.length;preview.validCount=validRows.length;preview.invalidCount=invalidRows.length;
+      return preview;
+    }
+    if(!validRows.length)return Object.assign([],{pagesScanned:visited.size,rowsFound:uniqueRows.length,validCount:0,invalidCount:invalidRows.length,invalidTargets:invalidRows});
+    const extracted=await Promise.all(validRows.map(async row=>{
+      try{
+        const response=await context.request.get(row.editUrl,{timeout:120000});
+        if(!response.ok())return null;
+        const html=await response.text();
+        const match=html.match(/<input[^>]+name=["']hllk["'][^>]+value=["'](\d+)["']/i)||html.match(/<input[^>]+value=["'](\d+)["'][^>]+name=["']hllk["']/i);
+        const hllk=match?.[1]||'';
+        return /^\d+$/.test(hllk)?{hllk,date:row.date,summary:row.summary,editUrl:row.editUrl,activities:row.activities,valid:true,issues:[]}:null;
+      }catch{return null;}
+    }));
+    const targets=extracted.filter(Boolean);
+    const extractedUrls=new Set(targets.map(item=>item.editUrl));
+    const idFailures=validRows.filter(row=>!extractedUrls.has(row.editUrl)).map(row=>({...row,valid:false,issues:['ID target hllk gagal dibaca; tidak akan diverifikasi']}));
+    const uniqueTargets=[...new Map(targets.map(item=>[item.hllk,item])).values()];
+    uniqueTargets.pagesScanned=visited.size;uniqueTargets.rowsFound=uniqueRows.length;uniqueTargets.validCount=uniqueTargets.length;uniqueTargets.invalidCount=invalidRows.length+idFailures.length;uniqueTargets.invalidTargets=[...invalidRows,...idFailures];
+    progress(id,'complete',`Pemindaian selesai: ${uniqueTargets.length} target siap, ${uniqueTargets.invalidCount} ditahan.`,{validCount:uniqueTargets.length,invalidCount:uniqueTargets.invalidCount,pagesScanned:visited.size});
+    return uniqueTargets;
+  } catch(error){progress(id,'error',`Pemindaian gagal: ${error.message}`);throw error;} finally {if(owned)await context.close();}
+}
+async function dryRunLlkToVerification(id){
+  const {context}=await launchEmployee(id);
+  try{
+    const page=context.pages()[0]??await context.newPage();
+    const llkEntries=await scrapeEntries(context,page);
+    if(llkEntries.available===false)throw new HttpError(400,llkEntries.warning||'Halaman LLK gagal dibaca');
+    const targets=await verificationTargets(id,context,false);
+    return {safe:true,verified:false,llk:{url:llkEntries.sourceUrl,pagesScanned:1,entries:llkEntries.length},verification:{filter:{status:'1',by:'nip'},pagesScanned:targets.pagesScanned||1,rowsFound:targets.rowsFound??targets.length,total:targets.length,validCount:targets.validCount??targets.filter(item=>item.valid).length,invalidCount:targets.invalidCount??targets.filter(item=>!item.valid).length,targets}};
+  }finally{await context.close();}
 }
 async function startVerificationScanRecording(input){
   const id=safeId(input.employeeId);
@@ -620,10 +739,50 @@ async function finishVerificationScanRecording(){
     return {url:location.href,radios:[...document.querySelectorAll('input[type="radio"]')].map(node=>({attrs:attrs(node),checked:node.checked,label:text(node.closest('label')||node.parentElement)})),buttons:[...document.querySelectorAll('a,button,input[type="submit"]')].map(node=>({text:text(node),attrs:attrs(node)})),rows:[...document.querySelectorAll('table tbody > tr')].map(row=>({text:text(row).slice(0,500),html:row.outerHTML.slice(0,5000)})),forms:[...document.forms].map(form=>({attrs:attrs(form),html:form.outerHTML.slice(0,10000)}))};
   });
   const result={employeeId:employee.id,startedAt,finishedAt:new Date().toISOString(),requests,dom};
-  context.off('request',capture);sessionCookies.set(employee.id,await context.cookies([LLK_BASE]));await saveJson(verificationScanRecordingFile,sanitize(result));await context.close();verificationScanRecording=null;
+  context.off('request',capture);await storeSessionCookies(employee.id,await context.cookies([LLK_BASE]));await saveJson(verificationScanRecordingFile,sanitize(result));await context.close();verificationScanRecording=null;
   return {url:dom.url,rows:dom.rows.length,requests:requests.length};
 }
 
+
+async function startNavigationRecording(input) {
+  const id=safeId(input.employeeId),mode=clean(input.mode);
+  if(!['llk','verifikasi'].includes(mode))bad('Mode rekaman tidak valid');
+  if(navigationRecording)throw new HttpError(409,'Perekaman navigasi sudah aktif');
+  const {employee,context}=await launchEmployee(id,false),page=context.pages()[0]??await context.newPage(),requests=[];
+  const capture=request=>{if(request.url().startsWith(LLK_BASE))requests.push({method:request.method(),url:request.url()});};
+  context.on('request',capture);
+  await context.addInitScript(() => {
+    window.__llkAgentClicks=[];
+    document.addEventListener('click',event=>{
+      const node=event.target.closest('a,button,input[type="submit"]');
+      if(!node)return;
+      window.__llkAgentClicks.push({at:new Date().toISOString(),tag:node.tagName.toLowerCase(),text:String(node.textContent||node.value||'').replace(/\s+/g,' ').trim(),href:node.href||'',id:node.id||'',name:node.getAttribute('name')||'',className:String(node.className||'')});
+    },true);
+  });
+  const current=llkLocation(page.url());
+  if(!current.authenticated)await page.goto(LLK_BASE,{waitUntil:'domcontentloaded'});
+  navigationRecording={employee,context,page,mode,requests,capture,startedAt:new Date().toISOString()};
+  return {active:true,mode,url:page.url(),message:`Di Edge, klik menu ${mode==='llk'?'LLK':'Verifikasi LLK'} lalu tampilkan daftar yang ingin dibaca.`};
+}
+
+async function finishNavigationRecording() {
+  if(!navigationRecording)throw new HttpError(409,'Tidak ada perekaman navigasi aktif');
+  const {employee,context,page,mode,requests,capture,startedAt}=navigationRecording;
+  let imported=null;
+  if(mode==='llk'){
+    imported=await importPersonal(employee.id,context,page);
+    if(imported?.candidate)await saveJson(personalFile(employee.id),imported.candidate);
+  }
+  const clicks=await page.evaluate(()=>window.__llkAgentClicks||[]).catch(()=>[]);
+  const dom=await page.evaluate(()=>({url:location.href,title:document.title,links:[...document.querySelectorAll('a[href]')].map(a=>({text:String(a.textContent||'').replace(/\s+/g,' ').trim(),href:a.href,id:a.id||'',className:String(a.className||'')})),tables:[...document.querySelectorAll('table')].map(table=>table.outerHTML.slice(0,100000))}));
+  const result={employeeId:employee.id,mode,startedAt,finishedAt:new Date().toISOString(),clicks,requests,dom,imported:sanitize(imported)};
+  context.off('request',capture);
+  await storeSessionCookies(employee.id,await context.cookies([LLK_BASE]));
+  await saveJson(join(DATA,`navigation-${mode}.json`),sanitize(result));
+  await context.close();
+  navigationRecording=null;
+  return {mode,url:dom.url,clicks:clicks.length,requests:requests.length,tables:dom.tables.length,importedEntries:imported?.scannedEntries||0,importedActivities:imported?.candidate?.activities?.length||0};
+}
 
 async function verificationDiagnostics(id) {
   const {context}=await launchEmployee(id);
@@ -639,6 +798,8 @@ async function verificationDiagnostics(id) {
   } finally {await context.close();}
 }
 
+const verificationListUrl=()=>`${LLK_BASE}/verifikasi?start_date=&end_date=&status=1&by=nip&q=`;
+const verificationPayload=(hllk,message)=>({hllk:String(hllk),redirect:verificationListUrl(),note:clean(message),verified:'2'});
 async function runAutomaticVerification(id,input) {
   const message=clean(input.message);
 
@@ -655,7 +816,7 @@ async function runAutomaticVerification(id,input) {
     const token=await extractCsrfToken(page,context);
     const results=[];
     for(const target of targets){
-      const payload=new URLSearchParams({hllk:target.hllk,redirect:`${LLK_BASE}/verifikasi`,note:message,verified:'2'});
+      const payload=new URLSearchParams(verificationPayload(target.hllk,message));
       if(token)payload.set('_token',token);
       const response=await context.request.post(`${LLK_BASE}/verifikasi/update`,{headers:{'content-type':'application/x-www-form-urlencoded',referer:`${LLK_BASE}/verifikasi`},data:payload.toString(),maxRedirects:0});
       results.push({hllk:target.hllk,status:response.status(),success:[200,302,303].includes(response.status())});
@@ -663,6 +824,13 @@ async function runAutomaticVerification(id,input) {
     await audit('verification.auto',id,{message,targetIds:targets.map(item=>item.hllk)},{counts:{total:results.length,success:results.filter(item=>item.success).length},result:'completed'});
     return {total:results.length,success:results.filter(item=>item.success).length,failed:results.filter(item=>!item.success).length,results};
   } finally {await context.close();}
+}
+
+function previewVerificationPayload(input){
+  const message=clean(input.message),hllk=clean(input.hllk);
+  if(!message)bad('Pesan verifikasi wajib diisi');
+  if(!/^\d+$/.test(hllk))bad('ID hllk tidak valid');
+  return {safe:true,submitted:false,method:'POST',url:`${LLK_BASE}/verifikasi/update`,payload:verificationPayload(hllk,message)};
 }
 
 
@@ -674,12 +842,14 @@ async function restorePersonal(input){if(!input||typeof input!=='object'||Array.
 
 async function api(req,res,url) {
   const path=url.pathname;
+  if(req.method==='GET'&&path==='/api/progress'){const id=safeId(url.searchParams.get('employeeId')),since=Math.max(0,Number(url.searchParams.get('since'))||0);return json(res,200,progressState(id,since));}
   if(req.method==='GET'&&path==='/api/settings')return json(res,200,await getSettings());
   if(req.method==='POST'&&path==='/api/settings'){const input=await bodyJson(req);return json(res,200,await saveSettings(input));}
   if(req.method==='GET'&&path==='/api/verification/diagnostics'){const id=safeId(url.searchParams.get('employeeId'));return json(res,200,await verificationDiagnostics(id));}
   if(req.method==='GET'&&path==='/api/holidays')return json(res,200,await getHolidayObject());
   if(req.method==='POST'&&path==='/api/holidays'){const input=await bodyJson(req);if(!input||typeof input!=='object')bad('Data hari libur tidak valid');await saveJson(holidayFile,input);await audit('holidays.update','local',input,{result:'saved'});return json(res,200,input);}
   if(req.method==='GET'&&path==='/api/employees')return json(res,200,await getEmployees());
+  if(req.method==='GET'&&path==='/api/workflow/llk-to-verification/dry-run'){const id=safeId(url.searchParams.get('employeeId'));return json(res,200,await dryRunLlkToVerification(id));}
   if(req.method==='GET'&&path==='/api/verifier')return json(res,200,existsSync(verifierFile)?await readJson(verifierFile):{employees:[]});
   if(req.method==='POST'&&path==='/api/verifier/import'){const input=await bodyJson(req);return json(res,200,await withLock(safeId(input.employeeId),()=>importVerifier(safeId(input.employeeId))));}
   if(req.method==='GET'&&path==='/api/templates')return json(res,200,await templateSnapshot());
@@ -691,8 +861,11 @@ async function api(req,res,url) {
   if(req.method==='POST'&&path==='/api/config/restore'){const input=await bodyJson(req);if(![1,2].includes(input.version))bad('Versi backup tidak didukung');const employees=validateEmployeeArray(input.employees),templates=input.templates?.departments||input.templates;await saveJson(employeeFile,employees);await applyTemplates(templates,'local');if(input.version===2)await restorePersonal(input.personalTemplates||{});return json(res,200,{restored:true,employees:employees.length});}
   if(req.method==='POST'&&path==='/api/roster/diff')return json(res,200,await rosterDiff());
   if(req.method==='POST'&&path==='/api/roster/apply')return json(res,200,await applyRoster());
-  if(req.method==='GET'&&path==='/api/verification/preview'){const id=safeId(url.searchParams.get('employeeId'));const targets=await verificationTargets(id);return json(res,200,{targets,total:targets.length});}
   if(req.method==='POST'&&path==='/api/verification/run'){const input=await bodyJson(req),id=safeId(input.employeeId);return json(res,200,await runAutomaticVerification(id,input));}
+  if(req.method==='GET'&&path==='/api/verification/preview'){const id=safeId(url.searchParams.get('employeeId'));const targets=await verificationTargets(id);return json(res,200,{targets,total:targets.length,pagesScanned:targets.pagesScanned||1,rowsFound:targets.rowsFound??targets.length,validCount:targets.validCount??targets.length,invalidCount:targets.invalidCount||0,invalidTargets:targets.invalidTargets||[]});}
+  if(req.method==='GET'&&path==='/api/navigation-recording/status')return json(res,200,{active:Boolean(navigationRecording),...(navigationRecording?{mode:navigationRecording.mode,url:navigationRecording.page.url(),startedAt:navigationRecording.startedAt}:{}),recorded:{llk:existsSync(join(DATA,'navigation-llk.json')),verifikasi:existsSync(join(DATA,'navigation-verifikasi.json'))}});
+  if(req.method==='POST'&&path==='/api/navigation-recording/start')return json(res,200,await startNavigationRecording(await bodyJson(req)));
+  if(req.method==='POST'&&path==='/api/navigation-recording/finish')return json(res,200,await finishNavigationRecording());
   if(req.method==='POST'&&path==='/api/verification-scan-recording/start')return json(res,200,await startVerificationScanRecording(await bodyJson(req)));
   if(req.method==='POST'&&path==='/api/verification-scan-recording/finish')return json(res,200,await finishVerificationScanRecording());
   if(req.method==='POST'&&path==='/api/bootstrap/login'){
@@ -708,13 +881,15 @@ async function api(req,res,url) {
     await page.goto(LLK_BASE,{waitUntil:'domcontentloaded'});
     return json(res,200,{tempId,message:'Browser login dibuka. Silakan login akun LLK Anda.'});
   }
+  if(req.method==='GET'&&path==='/api/bootstrap/status'){
+    const active=[...loginFlows.entries()].filter(([id,flow])=>id.startsWith('temp-')&&!flow.closing).map(([tempId,flow])=>({tempId,authenticated:Boolean(authenticatedLlkPage(flow.context)),actualNip:flow.actualNip||null,fetchedAt:flow.fetchedAt||null,createdAt:flow.createdAt,expiresAt:flow.expiresAt}));
+    return json(res,200,{active});
+  }
   if(req.method==='POST'&&path==='/api/bootstrap/complete'){
     const input=await bodyJson(req),tempId=safeId(input.tempId);
     const flow=loginFlows.get(tempId);
     if(!flow)throw new HttpError(409,'Sesi login eksternal tidak aktif atau kedaluwarsa');
-    const result=await completeExternalBootstrap(tempId,flow.employee,flow.context);
-    loginFlows.delete(tempId);
-    return json(res,200,result);
+    return json(res,200,await completeExternalBootstrap(tempId,flow.employee,flow.context));
   }
   if(req.method==='POST'&&path==='/api/verification-recording/start')return json(res,200,await startVerificationRecording(await bodyJson(req)));
   if(req.method==='POST'&&path==='/api/verification-recording/finish')return json(res,200,await finishVerificationRecording());
@@ -735,6 +910,16 @@ async function api(req,res,url) {
     await saveJson(employeeFile,employees);
     return json(res,200,employee);
   }
+  const employeeRoute = path.match(/^\/api\/employees\/([^/]+)\/(.+)$/);
+  if (!employeeRoute) return json(res,404,{error:'Endpoint tidak ditemukan'});
+  const id = safeId(decodeURIComponent(employeeRoute[1]));
+  const action = employeeRoute[2];
+  if(action==='personal-template'&&req.method==='GET')return json(res,200,await personalResponse(await findEmployee(id)));
+  if(action==='personal-template/import'&&req.method==='POST'){await bodyJson(req);return json(res,200,await withLock(id,()=>importPersonal(id)));}
+  if(action==='personal-template/apply'&&req.method==='POST')return json(res,200,await applyPersonal(id,await bodyJson(req)));
+  if(action==='personal-template'&&req.method==='DELETE')return json(res,200,await resetPersonal(id,await bodyJson(req)));
+  if(action==='preview'&&req.method==='POST'){const input=await bodyJson(req);return json(res,200,await generatePreview(await findEmployee(id),input.start,input.end,input.department));}
+  if(action==='report'&&req.method==='GET')return json(res,200,existsSync(reportFile(id))?await readJson(reportFile(id)):{results:[],success:0,failed:0});
   if(action==='login'&&req.method==='POST')return json(res,200,await openLogin(id));
   if(action==='login/status'&&req.method==='GET'){const flow=loginFlows.get(id); if(!flow||flow.closing)return json(res,200,{active:false}); const pages=await pageDiagnostics(flow.context), authenticated=Boolean(authenticatedLlkPage(flow.context)); return json(res,200,{active:true,authenticated,createdAt:flow.createdAt,expiresAt:flow.expiresAt,pages});}
   if(action==='login/complete'&&req.method==='POST')return json(res,200,await completeLogin(id));

@@ -1,6 +1,6 @@
 let employees = [], templates = {}, active = null, currentPreview = null, currentReport = null, templateStage = null, personalStage = null, busy = false;
 const loginFlows = new Map();
-let bootstrapFlow = null;
+let bootstrapFlow = sessionStorage.getItem('bootstrapFlow');
 let verificationRecordingActive = false;
 let verificationTargets = [];
 let loginPollTimer = null;
@@ -85,10 +85,24 @@ async function api(path, options = {}) {
   return data;
 }
 
+async function pollOperationProgress(employeeId,signal){
+  if(!employeeId)return;
+  let since=0;
+  while(!signal.aborted){
+    try{
+      const state=await api(`/api/progress?employeeId=${encodeURIComponent(employeeId)}&since=${since}`);
+      for(const event of state.events||[]){since=Math.max(since,event.sequence||0);log(`${event.message}${event.page?` (halaman ${event.page})`:''}${event.rowsFound!=null?` · ${event.rowsFound} target`:''}${event.validCount!=null?` · ${event.validCount} siap`:''}${event.invalidCount?` · ${event.invalidCount} ditahan`:''}`);}
+    }catch{}
+    await new Promise(resolve=>setTimeout(resolve,750));
+  }
+}
+
 async function runBusy(action, operationName = 'Operasi') {
   if (busy) return;
   setBusy(true);
   feedback();
+  const controller=new AbortController();
+  const polling=pollOperationProgress(active?.id,controller.signal);
   try {
     return await action();
   } catch (error) {
@@ -96,6 +110,8 @@ async function runBusy(action, operationName = 'Operasi') {
     log(msg);
     feedback(msg, true);
   } finally {
+    controller.abort();
+    await polling;
     setBusy(false);
   }
 }
@@ -103,16 +119,33 @@ async function runBusy(action, operationName = 'Operasi') {
 async function loadTemplates() {
   templates = await api('/api/templates');
   const groups = templates.departments || templates.templates || templates;
-  const select = $('#departmentSelect');
-  if (select) {
+  for (const select of [$('#departmentSelect'), $('#workTemplateSelect'), $('#generalTemplateSelect')]) {
+    if (!select) continue;
     select.innerHTML = Object.entries(groups)
       .filter(([, value]) => value && typeof value === 'object' && Array.isArray(value.activities))
       .map(([key, value]) => `<option value="${escapeHtml(key)}">${escapeHtml(value.label)}</option>`)
       .join('');
   }
+  renderGeneralTemplate($('#generalTemplateSelect')?.value);
   const versionNode = $('#templateVersion');
   if (versionNode) versionNode.textContent = templates.version || templates.meta?.version || 'standar';
 }
+
+function renderGeneralTemplate(key) {
+  const groups = templates.departments || templates.templates || templates;
+  const group = groups?.[key];
+  const tbody = $('#generalTemplateBody');
+  if (!tbody) return;
+  tbody.innerHTML = group?.activities?.length ? group.activities.map(activity => `
+    <tr>
+      <td><strong>${escapeHtml(activity.nama)}</strong></td>
+      <td>${escapeHtml(activity.kategori || 'Pendukung')}</td>
+      <td>${escapeHtml(activity.output || activity.keterangan || '—')}</td>
+    </tr>
+  `).join('') : '<tr><td colspan="3" class="emp-pos">Belum ada kegiatan standar.</td></tr>';
+}
+
+$('#generalTemplateSelect')?.addEventListener('change', event => renderGeneralTemplate(event.target.value));
 
 function renderEmployeeList() {
   const query = ($('#employeeSearch')?.value || '').trim().toLowerCase();
@@ -154,7 +187,31 @@ async function loadApp() {
   $('#customSatker').value = known ? '' : satker;
   const initial = resolveDefaultEmployee(employees);
   if (initial) selectEmployee(initial);
+  if ($('#workTemplateSelect') && initial?.department) $('#workTemplateSelect').value = initial.department;
   log(`Sistem siap. Satker: ${satker}. Profil aktif: ${initial?.name || 'Belum dipilih'}`);
+  const bootstrapStatus = await api('/api/bootstrap/status').catch(() => ({ active: [] }));
+  const pendingBootstrap = bootstrapStatus.active?.[0];
+  if (pendingBootstrap) {
+    bootstrapFlow = pendingBootstrap.tempId;
+    sessionStorage.setItem('bootstrapFlow', bootstrapFlow);
+    $('#employeeForm').hidden = false;
+    $('#quickSsoLoginBtn').hidden = true;
+    $('#quickSsoFetchBtn').hidden = false;
+    feedback(pendingBootstrap.fetchedAt ? 'Sesi Edge tetap aktif. Klik Saya sudah login untuk mengambil ulang daftar LLK.' : 'Sesi login Edge masih aktif. Selesaikan login lalu klik Saya sudah login.');
+  }
+  if (initial) {
+    const recordingStatus = await api('/api/navigation-recording/status').catch(() => ({active:false}));
+    const dialog = $('#navigationRecorderDialog');
+    if (recordingStatus.active) {
+      if (dialog && !dialog.open) dialog.showModal();
+      $('#startNavigationRecordingBtn').disabled = true;
+    } else if (!recordingStatus.recorded?.llk && !sessionStorage.getItem('navigationRecorderPrompted')) {
+      sessionStorage.setItem('navigationRecorderPrompted','1');
+      if (dialog && !dialog.open) dialog.showModal();
+      $('#navigationRecorderStatus').textContent = 'Pilih Daftar LLK atau Daftar Verifikasi. Edge akan dibuka otomatis; Anda cukup login dan membuka daftar yang benar.';
+      setTimeout(() => $('#startNavigationRecordingBtn')?.click(), 0);
+    }
+  }
 }
 
 function renderLoginFlow() {
@@ -297,7 +354,7 @@ function selectEmployee(employee) {
   currentPreview = null;
   currentReport = null;
   personalStage = null;
-  setWizardStep(1);
+  setWizardStep(2);
   const satker = employee?.satker || 'Pengadilan Negeri Natuna';
   const known = satker === 'Pengadilan Negeri Natuna';
   const select = $('#satkerSelect');
@@ -322,6 +379,8 @@ function selectEmployee(employee) {
 
   const positionNode = $('#profilePosition');
   if (positionNode) positionNode.textContent = employee.position;
+  const workTemplateSelect = $('#workTemplateSelect');
+  if (workTemplateSelect && employee.department) workTemplateSelect.value = employee.department;
 
   const activeNameNode = $('#activeProfileName');
   if (activeNameNode) activeNameNode.textContent = `${employee.name} (${employee.nip || employee.id})`;
@@ -577,7 +636,7 @@ function renderPersonalTemplate(info) {
   const fallbackText = $('#personalTemplateFallbackText');
   if (fallbackText) fallbackText.textContent = info.fallbackLabel || active?.department || '—';
 
-  const activities = info.activities || [];
+  const activities = isPersonal ? (info.activities || []) : [];
   const countNode = $('#personalTemplateCount');
   if (countNode) countNode.textContent = `${activities.length} kegiatan`;
 
@@ -592,9 +651,9 @@ function renderPersonalTemplate(info) {
         <td>${escapeHtml(act.start || '—')} – ${escapeHtml(act.end || '—')}</td>
         <td>${escapeHtml(act.type || act.kategori || 'Utama')}</td>
         <td>${escapeHtml(act.result || act.output || '—')}</td>
-        <td><small>${act.count ? `${act.count}x` : 'standar'}</small></td>
+        <td><small>${act.count ? `${act.count}x` : 'riwayat LLK'}</small></td>
       </tr>
-    `).join('') : '<tr><td colspan="5" class="emp-pos">Belum ada daftar kegiatan.</td></tr>';
+    `).join('') : '<tr><td colspan="5" class="emp-pos">Belum ada template personal. Login SSO lalu impor daftar LLK.</td></tr>';
   }
 }
 
@@ -692,12 +751,12 @@ function setDatePreset(type) {
 function openEmployeeForm() {
   const form = $('#employeeForm');
   if (!form) return;
-  form.hidden = false;
-  form.reset();
-  $('#fetchLastTen').checked = true;
-  const defaultSatker = active?.satker || 'Pengadilan Negeri Natuna';
-  $('#formSatkerInput').value = defaultSatker;
-  form.elements.nip?.focus();
+  form.hidden = !form.hidden;
+  if (!form.hidden) {
+    form.reset();
+    $('#quickSsoFetchBtn').hidden = true;
+    form.elements.supervisorNip?.focus();
+  }
 }
 
 $('#newEmployee')?.addEventListener('click', openEmployeeForm);
@@ -752,12 +811,13 @@ $('#finishVerificationRecordingBtn')?.addEventListener('click', () => runBusy(as
 }, 'Selesai Rekam Verifikasi'));
 $('#previewAutomaticVerificationBtn')?.addEventListener('click', () => active && runBusy(async () => {
   const result = await api(`/api/verification/preview?employeeId=${encodeURIComponent(active.id)}`);
-  verificationTargets = result.targets || [];
-  $('#verificationTargetCount').textContent = `${result.total} target`;
+  verificationTargets = (result.targets || []).filter(item => item.valid !== false);
+  $('#verificationTargetCount').textContent = `${result.validCount ?? verificationTargets.length} siap · ${result.invalidCount || 0} belum benar`;
   const preview = $('#verificationTargetPreview');
   preview.hidden = false;
-  preview.innerHTML = verificationTargets.length
-    ? `<ul>${verificationTargets.map(item => `<li><code>${escapeHtml(item.hllk)}</code> ${escapeHtml(item.summary)}</li>`).join('')}</ul>`
+  const allTargets = [...(result.targets || []), ...(result.invalidTargets || [])];
+  preview.innerHTML = allTargets.length
+    ? `<ul>${allTargets.map(item => `<li><strong>${item.valid === false ? 'BELUM BENAR' : 'SIAP'}</strong> ${escapeHtml(item.date || 'Tanggal tidak terbaca')} — ${escapeHtml(item.summary)}${item.issues?.length ? `<br><small>${escapeHtml(item.issues.join('; '))}</small>` : ''}</li>`).join('')}</ul>`
     : '<p>Tidak ada LLK dengan tag Belum Diverifikasi.</p>';
   syncControls();
 }, 'Pindai Verifikasi'));
@@ -814,41 +874,16 @@ $('#runWizardVerificationBtn')?.addEventListener('click', () => active && runBus
   await refreshWizardVerification();
 }, 'Verifikasi LLK Anggota'));
 
-$('#employeeForm')?.addEventListener('submit', event => runBusy(async () => {
-  event.preventDefault();
-  const f = new FormData(event.target);
-  log('Menyimpan profil pegawai dan atasan…');
-  const saved = await api('/api/employees', {
-    method: 'POST',
-    body: JSON.stringify({
-      satker: f.get('satker'),
-      nip: f.get('nip'),
-      department: f.get('department'),
-      supervisorNip: f.get('supervisorNip')
-    })
-  });
-  localStorage.setItem(`fetchLastTen:${saved.id}`, f.get('fetchLastTen') ? '1' : '0');
-  event.target.hidden = true;
-  await loadEmployees();
-  selectEmployee(saved);
-  log(`Profil ${saved.position} · NIP ${saved.nip} tersimpan. Lanjutkan login SSO.`);
-  $('#loginBtn')?.focus();
-}, 'Simpan Profil'));
 function updateSatkerUi() {
   const select = $('#satkerSelect');
   const custom = $('#customSatker');
-  const quick = $('#quickOtherBox');
   const isOther = select?.value === 'other';
   if (custom) custom.hidden = !isOther;
-  if (quick) quick.hidden = !isOther;
 }
 
 $('#satkerSelect')?.addEventListener('change', () => {
-  if ($('#satkerSelect').value === 'other') $('#quickSupervisorNip')?.focus();
-});
-
-$('#customSatker')?.addEventListener('change', () => {
-  $('#formSatkerInput').value = $('#customSatker').value.trim() || 'Pengadilan Negeri Natuna';
+  updateSatkerUi();
+  if ($('#satkerSelect').value === 'other') $('#customSatker')?.focus();
 });
 
 async function fetchBootstrapProfile() {
@@ -857,37 +892,47 @@ async function fetchBootstrapProfile() {
     method: 'POST',
     body: JSON.stringify({ tempId: bootstrapFlow })
   });
-  bootstrapFlow = null;
-  $('#quickSsoFetchBtn').hidden = true;
+  sessionStorage.setItem('bootstrapFlow', bootstrapFlow);
+  $('#quickSsoFetchBtn').hidden = false;
   selectEmployee(out.employee);
   loginFlows.set(out.employee.id, 'review');
   const loginBadge = $('#loginBadge');
-  if (loginBadge) loginBadge.textContent = 'SSO tersimpan';
+  if (loginBadge) loginBadge.textContent = 'SSO aktif';
   const loginNextBtn = $('#loginNextBtn');
   if (loginNextBtn) loginNextBtn.hidden = false;
   setWizardStep(2);
-  log(`Profil ${out.employee.name} (${out.employee.nip}) berhasil dibuat dari SSO.`);
-  feedback(`Profil ${out.employee.name} siap. Pilih tanggal LLK; login SSO tidak perlu diulang.`);
+  await loadEmployees();
+  const templateCount = out.history?.candidate?.activities?.length || out.history?.activities?.length || 0;
+  log(`Profil ${out.employee.name} (${out.employee.nip}) dibuat dari SSO; ${templateCount} pola kegiatan diimpor. Edge tetap terbuka.`);
+  feedback(`Sesi Edge tetap aktif. ${templateCount} pola kegiatan ditemukan; klik Saya sudah login untuk mengambil ulang.`);
 }
 
-$('#quickSsoLoginBtn')?.addEventListener('click', () => runBusy(async () => {
-  const supervisorNip = String($('#quickSupervisorNip')?.value || '').trim();
-  if (!supervisorNip) {
-    $('#quickSupervisorNip')?.focus();
-    throw new Error('Masukkan NIP/ID Atasan terlebih dahulu');
-  }
-  const satker = $('#customSatker')?.value.trim() || 'Satker Lain';
-  log('Membuka browser Edge untuk login SSO pegawai satker lain…');
-  const res = await api('/api/bootstrap/login', {
-    method: 'POST',
-    body: JSON.stringify({ satker, supervisorNip, department: 'umum_keuangan' })
-  });
-  bootstrapFlow = res.tempId;
-  $('#quickSsoFetchBtn').hidden = false;
-  log(res.message || 'Silakan selesaikan login SSO di Edge.');
-  feedback('Selesaikan login SSO di Edge, lalu klik Tarik Data Akun. Sistem juga mencoba mengambil data otomatis.');
-  setTimeout(() => fetchBootstrapProfile().catch(() => {}), 4000);
-}, 'Login SSO Pegawai Lain'));
+$('#employeeForm')?.addEventListener('submit', event => {
+  event.preventDefault();
+  runBusy(async () => {
+    const supervisorNip = String($('#quickSupervisorNip')?.value || '').trim();
+    if (!supervisorNip) {
+      $('#quickSupervisorNip')?.focus();
+      throw new Error('Masukkan NIP atasan terlebih dahulu');
+    }
+    const selectedSatker = $('#satkerSelect')?.value;
+    const satker = selectedSatker === 'other'
+      ? $('#customSatker')?.value.trim()
+      : selectedSatker;
+    if (!satker) throw new Error('Masukkan satuan kerja terlebih dahulu');
+    log('Membuka Edge untuk login SSO dan mengambil profil…');
+    const res = await api('/api/bootstrap/login', {
+      method: 'POST',
+      body: JSON.stringify({ satker, supervisorNip, department: 'umum_keuangan' })
+    });
+    bootstrapFlow = res.tempId;
+    sessionStorage.setItem('bootstrapFlow', bootstrapFlow);
+    $('#quickSsoLoginBtn').hidden = true;
+    $('#quickSsoFetchBtn').hidden = false;
+    log(res.message || 'Silakan selesaikan login SSO di Edge.');
+    feedback('Selesaikan login SSO di Edge, lalu klik Saya sudah login. Profil dan kegiatan pada halaman pertama /llk akan dibaca otomatis.');
+  }, 'Tambah Profil dari SSO');
+});
 
 $('#quickSsoFetchBtn')?.addEventListener('click', () => runBusy(fetchBootstrapProfile, 'Tarik Data Akun'));
 
@@ -1099,11 +1144,37 @@ $('#deleteConfirmBtn')?.addEventListener('click', () => active && runBusy(async 
 $('#personalTemplateLoginBtn')?.addEventListener('click', () => $('#loginBtn')?.click());
 
 $('#importPersonalTemplateBtn')?.addEventListener('click', () => active && runBusy(async () => {
-  log(`Mengambil pola dari 10 kegiatan LLK terakhir untuk ${active.name}…`);
-  const staged = await api(`/api/employees/${active.id}/personal-template/import`, { method: 'POST', body: JSON.stringify({ limit: 10 }) });
+  log(`Membaca halaman pertama daftar LLK untuk ${active.name}…`);
+  const staged = await api(`/api/employees/${active.id}/personal-template/import`, { method: 'POST', body: '{}' });
+  if (!staged.available) throw new Error(staged.warning || 'Daftar LLK tidak dapat dibaca');
   renderPersonalDiff(staged);
-  log('10 kegiatan LLK terakhir siap ditinjau sebagai template personal.');
-}, 'Ambil 10 Terakhir'));
+  log(`${staged.scannedEntries || 0} entri LLK dibaca dari ${staged.pagesScanned || 1} halaman (${staged.sourceUrl || '/llk'}); ${staged.candidate?.activities?.length || 0} pola unik siap ditinjau.`);
+}, 'Impor Seluruh LLK'));
+
+$('#openNavigationRecorderBtn')?.addEventListener('click', () => {
+  if (!active) return feedback('Pilih profil aktif terlebih dahulu.', true);
+  $('#startNavigationRecordingBtn').disabled = false;
+  $('#finishNavigationRecordingBtn').disabled = true;
+  $('#navigationRecorderStatus').textContent = 'Siap merekam.';
+  $('#navigationRecorderDialog')?.showModal();
+});
+
+$('#startNavigationRecordingBtn')?.addEventListener('click', () => active && runBusy(async () => {
+  const mode = document.querySelector('[name="navigationRecordMode"]:checked')?.value || 'llk';
+  const result = await api('/api/navigation-recording/start', {method:'POST',body:JSON.stringify({employeeId:active.id,mode})});
+  $('#startNavigationRecordingBtn').disabled = true;
+  $('#finishNavigationRecordingBtn').disabled = false;
+  $('#navigationRecorderStatus').textContent = result.message;
+  log(`Perekaman navigasi ${mode} dimulai di ${result.url}.`);
+}, 'Mulai Rekam Navigasi'));
+
+$('#finishNavigationRecordingBtn')?.addEventListener('click', () => runBusy(async () => {
+  const result = await api('/api/navigation-recording/finish', {method:'POST',body:'{}'});
+  $('#startNavigationRecordingBtn').disabled = false;
+  $('#finishNavigationRecordingBtn').disabled = true;
+  $('#navigationRecorderStatus').textContent = `Terekam: ${result.clicks} klik, ${result.requests} request, ${result.tables} tabel. URL akhir: ${result.url}`;
+  log(`Navigasi ${result.mode} terekam dari ${result.clicks} klik dan ${result.tables} tabel.`);
+}, 'Selesai Rekam Navigasi'));
 
 $('#personalStageConfirm')?.addEventListener('change', syncControls);
 
@@ -1227,10 +1298,11 @@ $('#previewBtn')?.addEventListener('click', () => active && runBusy(async () => 
   const start = $('#startDate')?.value;
   const end = $('#endDate')?.value;
   if (!start || !end) throw new Error('Tentukan tanggal mulai dan selesai.');
-  log(`Menyiapkan isian LLK dari ${start} sampai ${end}…`);
+  const department = $('#workTemplateSelect')?.value;
+  log(`Menyiapkan isian LLK dari ${start} sampai ${end} dengan template ${$('#workTemplateSelect')?.selectedOptions?.[0]?.textContent || department}…`);
   const preview = await api(`/api/employees/${active.id}/preview`, {
     method: 'POST',
-    body: JSON.stringify({ start, end })
+    body: JSON.stringify({ start, end, department })
   });
   renderPreview(preview);
   setWizardStep(3);

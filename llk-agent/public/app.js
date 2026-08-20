@@ -1,6 +1,7 @@
 let employees = [], templates = {}, active = null, currentPreview = null, currentReport = null, templateStage = null, personalStage = null, busy = false;
 const loginFlows = new Map();
 let bootstrapFlow = sessionStorage.getItem('bootstrapFlow');
+let supervisorLookupToken=null;
 let verificationRecordingActive = false;
 let verificationTargets = [];
 let loginPollTimer = null;
@@ -63,7 +64,7 @@ function syncControls() {
   if (loginBtn) loginBtn.disabled = busy || flow === 'waiting' || flow === 'completing';
   if (completeLoginBtn) completeLoginBtn.disabled = busy || flow !== 'waiting';
   if (cancelLoginBtn) cancelLoginBtn.disabled = busy || (flow !== 'waiting' && flow !== 'completing');
-  if (submitBtn) submitBtn.disabled = busy || !currentPreview || !$('#confirmCheck')?.checked;
+  if (submitBtn) {const supervisor=previewSupervisor(currentPreview);submitBtn.disabled = busy || !currentPreview || !$('#confirmCheck')?.checked || !supervisor.name || !supervisor.nip;}
   if (templateApplyBtn) templateApplyBtn.disabled = busy || !templateStage || !$('#templateConfirm')?.checked;
   if (applyPersonalTemplateBtn) applyPersonalTemplateBtn.disabled = busy || !personalStage || !$('#personalStageConfirm')?.checked;
   if (startVerificationRecordingBtn) startVerificationRecordingBtn.disabled = busy || verificationRecordingActive;
@@ -506,6 +507,12 @@ function updatePreviewStatuses(preview, report = null) {
   validatePreview(preview || []);
 }
 
+function previewSupervisor(preview){
+  const day=preview?.[0]||{};
+  const supervisor=day.verifier||day.supervisor||active?.verifier||active?.supervisor||{};
+  return {name:String(supervisor.name||'').trim(),nip:String(supervisor.nip||supervisor.id||supervisor.routeId||'').trim()};
+}
+
 function renderPreview(preview) {
   currentPreview = preview;
   const previewArea = $('#previewArea');
@@ -516,6 +523,11 @@ function renderPreview(preview) {
 
   const countNode = $('#previewCount');
   if (countNode) countNode.textContent = `${preview.length} hari`;
+  const supervisor=previewSupervisor(preview);
+  const supervisorBox=$('#supervisorConfirmation');
+  if(supervisorBox)supervisorBox.innerHTML=supervisor.name&&supervisor.nip
+    ? `<p><strong>Atasan yang akan menerima LLK:</strong><br>${escapeHtml(supervisor.name)} · NIP ${escapeHtml(supervisor.nip)}</p>`
+    : '<p class="validation-feedback"><strong>Identitas atasan belum lengkap.</strong> Perbaiki profil sebelum mengirim LLK.</p>';
 
   const container = $('#previewCards');
   if (container) {
@@ -530,7 +542,7 @@ function renderPreview(preview) {
                 <strong class="day-date">${escapeHtml(day.date)}</strong>
                 <span class="preview-status status-ready" data-day-status="${di}">Siap</span>
               </div>
-              <small class="day-meta">${escapeHtml(verifier.name || 'Verifikator')} · ID ${escapeHtml(verifier.routeId || verifier.id || '—')}</small>
+              <small class="day-meta">Atasan: ${escapeHtml(verifier.name || 'Belum diketahui')} · NIP ${escapeHtml(verifier.nip || verifier.id || verifier.routeId || '—')}</small>
             </div>
             <button class="btn btn-sm btn-outline edit-toggle-btn" type="button" data-toggle-edit="${di}">${isEditing ? 'Tutup edit' : 'Edit isian'}</button>
           </header>
@@ -907,13 +919,23 @@ async function fetchBootstrapProfile() {
   feedback(`Sesi Edge tetap aktif. ${templateCount} pola kegiatan ditemukan; klik Saya sudah login untuk mengambil ulang.`);
 }
 
+$('#quickSupervisorNip')?.addEventListener('input',()=>{supervisorLookupToken=null;$('#supervisorLookupConfirm').checked=false;$('#supervisorLookupResult').hidden=true;$('#supervisorLookupConfirmRow').hidden=true;});
+$('#lookupSupervisorBtn')?.addEventListener('click',()=>runBusy(async()=>{
+  const nip=String($('#quickSupervisorNip')?.value||'').trim();if(!/^\d{18}$/.test(nip))throw new Error('NIP atasan langsung harus tepat 18 digit angka');
+  log(`Mencari NIP ${nip} di Google Search…`);const result=await api(`/api/supervisor-lookup?nip=${encodeURIComponent(nip)}`);supervisorLookupToken=result.token;
+  const box=$('#supervisorLookupResult');box.hidden=false;box.innerHTML=result.results?.length
+    ? `<p><strong>5 halaman teratas Google untuk NIP ${escapeHtml(nip)}</strong></p>${result.results.map((item,index)=>`<article class="result-card"><strong>${index+1}. ${escapeHtml(item.title)}</strong><p>Nama: <strong>${escapeHtml(item.name||'tidak teridentifikasi')}</strong><br>Jabatan: <strong>${escapeHtml(item.position||'tidak teridentifikasi')}</strong><br>Satker: <strong>${escapeHtml(item.satker||'tidak teridentifikasi')}</strong></p><small>${escapeHtml(item.snippet||'Tidak ada cuplikan.')}</small><p><a href="${escapeHtml(item.url)}" target="_blank" rel="noopener">Buka sumber</a></p></article>`).join('')}<p><a href="${escapeHtml(result.sourceUrl)}" target="_blank" rel="noopener">Buka semua hasil Google</a></p>`
+    : `<p><strong>NIP ${escapeHtml(nip)} tidak ditemukan pada hasil publik Google.</strong></p><p><a href="${escapeHtml(result.sourceUrl)}" target="_blank" rel="noopener">Periksa langsung di Google</a>. Jangan lanjut jika nama dan satker tidak dapat dipastikan.</p>`;
+  $('#supervisorLookupConfirmRow').hidden=false;$('#supervisorLookupConfirm').checked=false;
+},'Pencarian NIP Atasan'));
+
 $('#employeeForm')?.addEventListener('submit', event => {
   event.preventDefault();
   runBusy(async () => {
     const supervisorNip = String($('#quickSupervisorNip')?.value || '').trim();
-    if (!supervisorNip) {
+    if (!/^\d{18}$/.test(supervisorNip)) {
       $('#quickSupervisorNip')?.focus();
-      throw new Error('Masukkan NIP atasan terlebih dahulu');
+      throw new Error('NIP atasan langsung harus tepat 18 digit angka');
     }
     const selectedSatker = $('#satkerSelect')?.value;
     const satker = selectedSatker === 'other'
@@ -923,7 +945,7 @@ $('#employeeForm')?.addEventListener('submit', event => {
     log('Membuka Edge untuk login SSO dan mengambil profil…');
     const res = await api('/api/bootstrap/login', {
       method: 'POST',
-      body: JSON.stringify({ satker, supervisorNip, department: 'umum_keuangan' })
+      body: JSON.stringify({ satker, supervisorNip, department: 'umum_keuangan', supervisorLookupToken, supervisorConfirmed:$('#supervisorLookupConfirm')?.checked===true })
     });
     bootstrapFlow = res.tempId;
     sessionStorage.setItem('bootstrapFlow', bootstrapFlow);
@@ -1025,9 +1047,9 @@ $('#auditBtn')?.addEventListener('click', () => active && runBusy(async () => {
 $('#confirmCheck')?.addEventListener('change', syncControls);
 
 $('#submitBtn')?.addEventListener('click', () => runBusy(async () => {
-  if (!active || !currentPreview || !validatePreview(currentPreview) || !$('#confirmCheck')?.checked) {
-    throw new Error('Centang konfirmasi sebelum mengirim ke LLK.');
-  }
+  if (!active || !currentPreview || !validatePreview(currentPreview) || !$('#confirmCheck')?.checked) throw new Error('Centang konfirmasi sebelum mengirim ke LLK.');
+  const supervisor=previewSupervisor(currentPreview);
+  if(!supervisor.name||!supervisor.nip)throw new Error('Identitas nama dan NIP atasan belum lengkap. Perbaiki profil sebelum mengirim LLK.');
   const policy = $('#duplicatePolicy')?.value || 'skip';
   log(`Mengirim ${currentPreview.length} hari isian ke LLK…`);
   const report = await api(`/api/employees/${active.id}/submit`, {

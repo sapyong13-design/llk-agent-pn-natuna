@@ -21,8 +21,12 @@
       <div class="header-actions">
         <button class="btn btn-sm btn-primary" id="newEmployee" type="button">Tambah profil</button>
         <form class="quick-other-box" id="employeeForm" hidden>
-          <label class="sr-only" for="quickSupervisorNip">NIP atasan</label>
-          <input class="court-custom" id="quickSupervisorNip" name="supervisorNip" inputmode="numeric" pattern="[0-9]{1,20}" placeholder="NIP atasan" required>
+          <label class="sr-only" for="quickSupervisorNip">NIP atasan langsung yang akan memverifikasi LLK</label>
+          <input class="court-custom" id="quickSupervisorNip" name="supervisorNip" inputmode="numeric" pattern="[0-9]{18}" minlength="18" maxlength="18" autocomplete="off" aria-describedby="quickSupervisorHelp" placeholder="18 digit NIP atasan langsung" required>
+          <small class="field-help" id="quickSupervisorHelp">Masukkan NIP atasan langsung yang berwenang memverifikasi LLK, bukan NIP pegawai yang dibuatkan profil.</small>
+          <button class="btn btn-sm btn-outline" id="lookupSupervisorBtn" type="button">Cari NIP di Google</button>
+          <div class="review-box" id="supervisorLookupResult" hidden></div>
+          <label class="check-row" id="supervisorLookupConfirmRow" hidden><input type="checkbox" id="supervisorLookupConfirm"> Hasil pencarian sudah saya periksa dan sesuai dengan atasan langsung.</label>
           <button class="btn btn-sm btn-primary" id="quickSsoLoginBtn" type="submit">Login SSO &amp; buat profil</button>
           <button class="btn btn-sm btn-outline" id="quickSsoFetchBtn" type="button" hidden>Saya sudah login</button>
         </form>
@@ -158,6 +162,7 @@
                     <option value="abort">Batalkan semua</option>
                   </select>
                 </div>
+                <div class="review-box" id="supervisorConfirmation" role="status"></div>
                 <label class="check-row">
                   <input type="checkbox" id="confirmCheck"> Saya memastikan data sesuai pekerjaan nyata.
                 </label>

@@ -34,6 +34,21 @@ const stagedPersonal = new Map();
 const operationProgress=new Map();
 function progress(id,stage,message,detail={}){const current=operationProgress.get(id)||{sequence:0,events:[]};const event={sequence:++current.sequence,at:new Date().toISOString(),stage,message,...sanitize(detail)};current.events.push(event);if(current.events.length>100)current.events.shift();current.active=!['complete','error'].includes(stage);current.latest=event;operationProgress.set(id,current);return event;}
 function progressState(id,since=0){const current=operationProgress.get(id)||{sequence:0,events:[],active:false,latest:null};return {active:current.active,sequence:current.sequence,latest:current.latest,events:current.events.filter(event=>event.sequence>since)};}
+const supervisorLookups=new Map();
+async function googleSupervisorLookup(rawNip){
+  const nip=employeeId(rawNip);if(!/^\d{18}$/.test(nip))bad('NIP atasan harus tepat 18 digit');
+  const spaced=`${nip.slice(0,8)} ${nip.slice(8,14)} ${nip.slice(14,15)} ${nip.slice(15)}`,query=`${nip} OR "${spaced}"`,sourceUrl=`https://www.google.com/search?client=firefox-b-d&hl=id&filter=0&pws=0&q=${encodeURIComponent(query)}`;
+  const context=await chromium.launchPersistentContext(join(PROFILE_ROOT,'google-search'),{channel:'msedge',headless:false,locale:'id-ID',viewport:null});
+  let blocks=[];
+  try{
+    const page=context.pages()[0]??await context.newPage();await page.goto(sourceUrl,{waitUntil:'domcontentloaded',timeout:60000});
+    await page.waitForSelector('a h3',{timeout:30000}).catch(()=>{});if(!await page.locator('a h3').count()){const body=await page.locator('body').innerText().catch(()=>'');throw new HttpError(502,/unusual traffic|bukan robot|not a robot|captcha/i.test(body)?'Google meminta verifikasi CAPTCHA. Selesaikan CAPTCHA pada jendela Edge sebelum 30 detik habis, atau klik Cari NIP lagi; sesi verifikasi disimpan.':'Google tidak menampilkan hasil pencarian. Buka tautan Google dan periksa koneksi atau pembatasan akses.');}
+    blocks=await page.locator('a:has(h3)').evaluateAll((links,nip)=>links.slice(0,5).map(link=>{const container=link.closest('[data-snhf],[data-sncf],div.MjjYud,div.g')||link.parentElement?.parentElement;const text=String(container?.innerText||'').replace(/\s+/g,' ').trim();return {title:String(link.querySelector('h3')?.textContent||'').trim(),url:link.href,snippet:text.replace(String(link.querySelector('h3')?.textContent||''),'').replace(nip,'').trim().slice(0,700)};}),nip);
+  }finally{await context.close();}
+  const classify=item=>{const text=`${item.title} ${item.snippet}`.replace(/\s+/g,' ').trim(),name=(text.match(/(?:Nama|Nama Pegawai)\s*[:\-]\s*([A-Z][A-Za-zÀ-ÿ.' ,]{3,80})/i)||text.match(/\b([A-Z][A-ZÀ-Ÿ.' ]{5,80}(?:,\s*[A-Z.]+)?)\b/))?.[1]?.trim()||'',position=(text.match(/(?:Jabatan|Posisi)\s*[:\-]\s*([^|;]{3,100})/i)||text.match(/\b(Sekretaris|Panitera(?: Muda)?|Hakim|Analis[^,;|]{0,70}|Kepala Sub Bagian[^,;|]{0,70}|Kasubbag[^,;|]{0,70})\b/i))?.[1]?.trim()||'',satker=(text.match(/(?:Satuan Kerja|Satker)\s*[:\-]\s*([^|;]{3,120})/i)||text.match(/\b((?:Pengadilan Negeri|Pengadilan Tinggi|Mahkamah Agung|Pengadilan Agama|Pengadilan Tata Usaha Negara)\s+[A-Za-zÀ-ÿ ]{2,60})\b/i))?.[1]?.trim()||'';return {...item,name:name||null,position:position||null,satker:satker||null};};
+  const results=blocks.filter(item=>item.title&&/^https?:/i.test(item.url)).slice(0,5).map(classify),token=randomBytes(16).toString('hex'),result={nip,query:`"${nip}"`,sourceUrl,results,found:results.length>0,token,checkedAt:new Date().toISOString()};
+  supervisorLookups.set(token,{nip,expires:Date.now()+10*60*1000});return result;
+}
 async function getSettings() {
   if (existsSync(settingsFile)) {
     try { return await readJson(settingsFile); } catch {}
@@ -440,8 +455,8 @@ async function importVerifier(id, existingContext, existingPage){
 }
 async function templateSnapshot(){const templates=await readJson(templateFile);return templates.version&&templates.departments?templates:{version:1,updatedAt:null,departments:templates};}
 async function applyTemplates(input,actor){const current=await templateSnapshot(),departments=validateTemplates(input.departments||input);await mkdir(templateHistoryRoot,{recursive:true});await saveJson(join(templateHistoryRoot,`${String(current.version).padStart(6,'0')}-${Date.now()}.json`),current);await rotateFiles(templateHistoryRoot,'');const next={version:current.version+1,updatedAt:new Date().toISOString(),departments};await saveJson(templateFile,next);await audit('templates.apply',actor,{version:next.version},{result:'applied'});return next;}
-async function readPersonal(id){return existsSync(personalFile(id))?sanitize(await readJson(personalFile(id))):null;}
-function validatePersonal(value,id){if(!value||typeof value!=='object'||value.employeeId!==id||!Array.isArray(value.activities)||value.activities.length>1000)bad('Template pribadi tidak valid');const activities=value.activities.map(a=>{const nama=clean(a?.nama),kategori=clean(a?.kategori)||'Pendukung';if(!nama||/^istirahat$/i.test(nama)||!['Utama','Pendukung'].includes(kategori))bad('Kegiatan template pribadi tidak valid');const out={nama,kategori};for(const key of ['start','end','result','output'])if(clean(a[key]))out[key]=clean(a[key]);return out;});return {...sanitize(value),employeeId:id,activities};}
+async function readPersonal(id){return existsSync(personalFile(id))?validatePersonal(await readJson(personalFile(id)),id):null;}
+function validatePersonal(value,id){if(!value||typeof value!=='object'||value.employeeId!==id||!Array.isArray(value.activities)||value.activities.length>1000)bad('Template pribadi tidak valid');const activities=value.activities.map(a=>{const nama=clean(a?.nama),kategori=clean(a?.kategori)||'Pendukung',result=clean(a?.result||a?.output);if(!nama||/^istirahat$/i.test(nama)||!['Utama','Pendukung'].includes(kategori))bad('Kegiatan template pribadi tidak valid');return {nama,kategori,...(result?{result}:{})};});return {...sanitize(value),employeeId:id,activities};}
 async function personalResponse(employee){const personal=await readPersonal(employee.id),stored=await readJson(templateFile),departments=stored.departments||stored,fallback=departments[employee.department];return {source:personal?.activities?.length?'personal':'department',personal,activities:personal?.activities?.length?personal.activities:(fallback?.activities||[]),fallbackLabel:fallback?.label||employee.department};}
 async function importPersonal(id, existingContext, existingPage){
   const employee=await findEmployee(id),owned=!existingContext,{context}=existingContext?{context:existingContext}:await launchEmployee(id);
@@ -453,7 +468,7 @@ async function importPersonal(id, existingContext, existingPage){
       const nama=clean(entry.description);
       if(!nama||/^istirahat$/i.test(nama))continue;
       const activity={nama,kategori:/^(Utama|Pendukung)$/i.test(entry.type)?clean(entry.type):'Pendukung'};
-      for(const key of ['start','end','result','output'])if(clean(entry[key]))activity[key]=clean(entry[key]);
+      const result=clean(entry.result||entry.output);if(result)activity.result=result;
       const key=canonical(activity);
       if(!seen.has(key))seen.set(key,{...activity,occurrences:1,lastSeen:entry.date||null});
       else {const item=seen.get(key);item.occurrences+=1;if(entry.date&&(!item.lastSeen||entry.date>item.lastSeen))item.lastSeen=entry.date;}
@@ -654,6 +669,7 @@ async function verificationTargets(id, existingContext, extractIds = true) {
         }catch(error){if(!/Execution context was destroyed|navigation/i.test(error.message)||attempt===4)throw error;await page.waitForTimeout(1000);}
       }
       rows.push(...(pageRows||[]));
+      progress(id,'page-result',`Halaman ${pageNum}: ${(pageRows||[]).length} target terbaca.`,{page:pageNum,rowsFound:(pageRows||[]).length});
       const next=page.locator('ul.pagination li:not(.disabled):not(.active) a[rel="next"], ul.pagination li:not(.disabled):not(.active) a').filter({hasText:/^(?:Next|Berikut|›|»|\d+)$/i}).last();
       if(!await next.count())break;
       const href=await next.getAttribute('href');
@@ -671,18 +687,18 @@ async function verificationTargets(id, existingContext, extractIds = true) {
     }
     for(const row of uniqueRows){
       const issues=[];
-      if(!row.date)issues.push('Tanggal kegiatan tidak terbaca');
+      if(!row.date)issues.push(`Tanggal kegiatan tidak terbaca dari: ${row.rawDate||'kosong'}`);
       else if(dateCounts.get(row.date)>1)issues.push(`Tanggal duplikat: ${row.date}`);
       const end=row.activities?.at(-1)?.end||'';
       const dow=row.date?parseDate(row.date).getDay():null,expectedEnd=dow===5?'17:00':dow>=1&&dow<=4?'16:30':null;
-      if(expectedEnd&&end!==expectedEnd)issues.push(`Jam akhir ${end||'tidak terbaca'}; seharusnya ${expectedEnd}`);
+      if(!row.activities?.length)issues.push('Rincian kegiatan tidak terbaca dari tabel target');
+      else if(expectedEnd&&end!==expectedEnd)issues.push(`Jam akhir ${end||'tidak terbaca'}; seharusnya ${expectedEnd}`);
       const work=row.activities?.filter(item=>!/^istirahat$/i.test(clean(item.description)))||[];
-      if(!work.length)issues.push('Deskripsi kegiatan tidak terbaca');
-      else if(work.some(item=>!clean(item.description)||clean(item.description).length<4))issues.push('Deskripsi kegiatan belum benar');
+      if(row.activities?.length&&!work.length)issues.push('Deskripsi kegiatan hanya berisi Istirahat');
+      else if(work.some(item=>!clean(item.description)||clean(item.description).length<4))issues.push('Deskripsi kegiatan belum benar atau tidak terbaca');
       row.valid=issues.length===0;row.issues=issues;
     }
-    const validRows=uniqueRows.filter(row=>row.valid);
-    const invalidRows=uniqueRows.filter(row=>!row.valid);
+    const validRows=uniqueRows.filter(row=>row.valid),invalidRows=uniqueRows.filter(row=>!row.valid);
     if(!extractIds){
       const preview=uniqueRows.map(row=>({date:row.date,summary:row.summary,editUrl:row.editUrl,activities:row.activities,valid:row.valid,issues:row.issues}));
       progress(id,'preview',`Validasi selesai: ${validRows.length} siap, ${invalidRows.length} belum benar.`,{validCount:validRows.length,invalidCount:invalidRows.length});
@@ -690,19 +706,21 @@ async function verificationTargets(id, existingContext, extractIds = true) {
       return preview;
     }
     if(!validRows.length)return Object.assign([],{pagesScanned:visited.size,rowsFound:uniqueRows.length,validCount:0,invalidCount:invalidRows.length,invalidTargets:invalidRows});
-    const extracted=await Promise.all(validRows.map(async row=>{
+    const extracted=await Promise.all(validRows.map(async (row,index)=>{
+      const started=Date.now();progress(id,'target-fetch',`Membaca ID target ${index+1}/${validRows.length}…`,{target:index+1,totalTargets:validRows.length,date:row.date});
+      let editPage;
       try{
-        const response=await context.request.get(row.editUrl,{timeout:120000});
-        if(!response.ok())return null;
-        const html=await response.text();
-        const match=html.match(/<input[^>]+name=["']hllk["'][^>]+value=["'](\d+)["']/i)||html.match(/<input[^>]+value=["'](\d+)["'][^>]+name=["']hllk["']/i);
-        const hllk=match?.[1]||'';
-        return /^\d+$/.test(hllk)?{hllk,date:row.date,summary:row.summary,editUrl:row.editUrl,activities:row.activities,valid:true,issues:[]}:null;
-      }catch{return null;}
+        editPage=await context.newPage();
+        const response=await editPage.goto(row.editUrl,{waitUntil:'domcontentloaded',timeout:120000});
+        if(!response?.ok())return {failure:{...row,valid:false,issues:[`Halaman edit gagal: HTTP ${response?.status()||'tanpa respons'} setelah ${Date.now()-started} ms`]}};
+        const input=editPage.locator('input[name="hllk"]').first(),hllk=await input.inputValue({timeout:10000}).catch(()=>''),title=clean(await editPage.title().catch(()=>''));
+        if(/^\d+$/.test(hllk))return {target:{hllk,date:row.date,summary:row.summary,editUrl:row.editUrl,activities:row.activities,valid:true,issues:[]}};
+        const formNames=await editPage.locator('input[name],select[name],textarea[name]').evaluateAll(nodes=>nodes.map(node=>node.name)).catch(()=>[]);
+        return {failure:{...row,valid:false,issues:[`ID hllk tidak ditemukan; halaman "${title||'tanpa judul'}", URL akhir ${editPage.url()}, field: ${[...new Set(formNames)].slice(0,12).join(', ')||'tidak ada'} (${Date.now()-started} ms)`]}};
+      }catch(error){return {failure:{...row,valid:false,issues:[`${/timeout/i.test(error.message)?'Timeout 120 detik':'Fetch halaman edit gagal'}: ${error.message}`]}};}
+      finally{if(editPage)await editPage.close().catch(()=>{});}
     }));
-    const targets=extracted.filter(Boolean);
-    const extractedUrls=new Set(targets.map(item=>item.editUrl));
-    const idFailures=validRows.filter(row=>!extractedUrls.has(row.editUrl)).map(row=>({...row,valid:false,issues:['ID target hllk gagal dibaca; tidak akan diverifikasi']}));
+    const targets=extracted.map(item=>item.target).filter(Boolean),idFailures=extracted.map(item=>item.failure).filter(Boolean);
     const uniqueTargets=[...new Map(targets.map(item=>[item.hllk,item])).values()];
     uniqueTargets.pagesScanned=visited.size;uniqueTargets.rowsFound=uniqueRows.length;uniqueTargets.validCount=uniqueTargets.length;uniqueTargets.invalidCount=invalidRows.length+idFailures.length;uniqueTargets.invalidTargets=[...invalidRows,...idFailures];
     progress(id,'complete',`Pemindaian selesai: ${uniqueTargets.length} target siap, ${uniqueTargets.invalidCount} ditahan.`,{validCount:uniqueTargets.length,invalidCount:uniqueTargets.invalidCount,pagesScanned:visited.size});
@@ -847,6 +865,7 @@ async function api(req,res,url) {
   if(req.method==='POST'&&path==='/api/settings'){const input=await bodyJson(req);return json(res,200,await saveSettings(input));}
   if(req.method==='GET'&&path==='/api/verification/diagnostics'){const id=safeId(url.searchParams.get('employeeId'));return json(res,200,await verificationDiagnostics(id));}
   if(req.method==='GET'&&path==='/api/holidays')return json(res,200,await getHolidayObject());
+  if(req.method==='GET'&&path==='/api/supervisor-lookup')return json(res,200,await googleSupervisorLookup(url.searchParams.get('nip')));
   if(req.method==='POST'&&path==='/api/holidays'){const input=await bodyJson(req);if(!input||typeof input!=='object')bad('Data hari libur tidak valid');await saveJson(holidayFile,input);await audit('holidays.update','local',input,{result:'saved'});return json(res,200,input);}
   if(req.method==='GET'&&path==='/api/employees')return json(res,200,await getEmployees());
   if(req.method==='GET'&&path==='/api/workflow/llk-to-verification/dry-run'){const id=safeId(url.searchParams.get('employeeId'));return json(res,200,await dryRunLlkToVerification(id));}
@@ -872,6 +891,8 @@ async function api(req,res,url) {
     const input=await bodyJson(req);
     const supervisorNip=employeeId(input.supervisorNip);
     if(!supervisorNip)bad('NIP atasan wajib diisi');
+    const lookup=supervisorLookups.get(clean(input.supervisorLookupToken));
+    if(!lookup||lookup.expires<Date.now()||lookup.nip!==supervisorNip||input.supervisorConfirmed!==true)throw new HttpError(409,'Periksa hasil Google Search dan konfirmasi identitas atasan terlebih dahulu');
     const satker=clean(input.satker)||'Satker Lain';
     const {employee,context,tempId}=await launchExternalBootstrap(satker,supervisorNip,input.department);
     const flow={employee,context,createdAt:new Date().toISOString(),expiresAt:new Date(Date.now()+LOGIN_FLOW_TTL).toISOString(),closing:false};

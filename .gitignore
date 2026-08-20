@@ -1,0 +1,22 @@
+# Browser profiles contain cookies and authenticated sessions
+llk-agent/profiles/
+llk-agent/.edge-profile/
+
+# Runtime records and captured LLK requests
+llk-agent/data/audit.jsonl
+llk-agent/data/report-*.json
+llk-agent/data/verification-recording.json
+llk-agent/data/verification-scan-recording.json
+llk-agent/data/template-history/
+llk-agent/data/personal-template-history/
+llk-agent/data/employees.json
+llk-agent/data/verifier-relationships.json
+llk-agent/data/personal-templates/
+
+# Local runtime and backups
+*.log
+*.zip
+*.bak
+node_modules/
+.DS_Store
+Thumbs.db

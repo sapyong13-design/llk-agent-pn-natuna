@@ -1,0 +1,15 @@
+{
+  "name": "llk-agent-app",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node ops.mjs preflight && node server.js",
+    "preflight": "node ops.mjs preflight",
+    "backup": "node ops.mjs backup",
+    "rotate": "node ops.mjs rotate"
+  },
+  "dependencies": {
+    "playwright-core": "^1.55.0"
+  }
+}

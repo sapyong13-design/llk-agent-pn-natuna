@@ -1,0 +1,110 @@
+{
+  "hakim": {
+    "label": "Pimpinan & Hakim",
+    "activities": [
+      { "nama": "Menyidangkan perkara sesuai jadwal", "kategori": "Utama", "output": "1 Perkara", "keterangan": "Perkara diperiksa dalam persidangan" },
+      { "nama": "Menelaah berkas dan alat bukti perkara", "kategori": "Utama", "output": "1 Berkas", "keterangan": "Berkas dan alat bukti ditelaah" },
+      { "nama": "Bermusyawarah untuk menetapkan putusan perkara", "kategori": "Utama", "output": "1 Perkara", "keterangan": "Pertimbangan hukum dimusyawarahkan" },
+      { "nama": "Menyusun konsep putusan atau penetapan", "kategori": "Utama", "output": "1 Naskah", "keterangan": "Konsep putusan atau penetapan tersusun" },
+      { "nama": "Membacakan putusan atau penetapan", "kategori": "Utama", "output": "1 Putusan/Penetapan", "keterangan": "Putusan atau penetapan dibacakan" },
+      { "nama": "Mengawasi bidang kepaniteraan atau kesekretariatan", "kategori": "Pendukung", "output": "1 Laporan", "keterangan": "Hasil pengawasan bidang tercatat" },
+      { "nama": "Mengikuti rapat pembinaan bulanan", "kategori": "Pendukung", "output": "1 Kegiatan", "keterangan": "Rapat pembinaan diikuti" },
+      { "nama": "Memvalidasi penetapan dan izin", "kategori": "Utama", "output": "1 Penetapan", "keterangan": "Penetapan atau izin tervalidasi" }
+    ]
+  },
+  "panitera": {
+    "label": "Panitera & Panitera Pengganti",
+    "activities": [
+      { "nama": "Mencatat jalannya persidangan perkara", "kategori": "Utama", "output": "1 Catatan Sidang", "keterangan": "Jalannya sidang tercatat" },
+      { "nama": "Menyusun berita acara sidang", "kategori": "Utama", "output": "1 Berita Acara", "keterangan": "Berita acara sidang tersusun" },
+      { "nama": "Mengunggah dokumen penundaan sidang", "kategori": "Utama", "output": "1 Berkas", "keterangan": "Dokumen penundaan sidang terunggah" },
+      { "nama": "Menyiapkan konsep salinan atau petikan putusan", "kategori": "Utama", "output": "1 Naskah", "keterangan": "Konsep salinan atau petikan tersedia" },
+      { "nama": "Melakukan minutasi berkas perkara", "kategori": "Utama", "output": "1 Berkas", "keterangan": "Berkas perkara selesai diminutasi" },
+      { "nama": "Menyerahkan berkas minutasi kepada panitera muda", "kategori": "Pendukung", "output": "1 Berkas", "keterangan": "Berkas minutasi diserahkan" },
+      { "nama": "Menyiapkan penetapan penahanan atau hari sidang", "kategori": "Utama", "output": "1 Penetapan", "keterangan": "Penetapan siap diperiksa" }
+    ]
+  },
+  "pidana": {
+    "label": "Kepaniteraan Pidana & Perikanan",
+    "activities": [
+      { "nama": "Memeriksa kelengkapan berkas perkara pidana", "kategori": "Utama", "output": "1 Berkas", "keterangan": "Kelengkapan berkas diperiksa" },
+      { "nama": "Mencatat register perkara pidana", "kategori": "Utama", "output": "1 Perkara", "keterangan": "Perkara tercatat dalam register" },
+      { "nama": "Memverifikasi permohonan penyitaan atau penggeledahan", "kategori": "Utama", "output": "1 Permohonan", "keterangan": "Permohonan penyidik terverifikasi" },
+      { "nama": "Mencatat perpanjangan penahanan terdakwa", "kategori": "Utama", "output": "1 Berkas", "keterangan": "Masa penahanan tercatat" },
+      { "nama": "Mengirim petikan atau salinan putusan pidana", "kategori": "Utama", "output": "1 Salinan", "keterangan": "Putusan terkirim kepada pihak terkait" },
+      { "nama": "Menyusun berkas upaya hukum pidana", "kategori": "Utama", "output": "1 Berkas", "keterangan": "Berkas upaya hukum tersusun" },
+      { "nama": "Mengarsipkan berkas perkara pidana", "kategori": "Pendukung", "output": "1 Berkas", "keterangan": "Berkas pidana tersimpan di ruang arsip" }
+    ]
+  },
+  "perdata": {
+    "label": "Kepaniteraan Perdata",
+    "activities": [
+      { "nama": "Memverifikasi pendaftaran perkara perdata", "kategori": "Utama", "output": "1 Berkas", "keterangan": "Pendaftaran perkara terverifikasi" },
+      { "nama": "Mencatat panjar biaya perkara", "kategori": "Utama", "output": "1 Transaksi", "keterangan": "Panjar biaya perkara tercatat" },
+      { "nama": "Meregister perkara perdata", "kategori": "Utama", "output": "1 Perkara", "keterangan": "Perkara perdata teregister" },
+      { "nama": "Mencatat hasil mediasi perkara", "kategori": "Utama", "output": "1 Berkas", "keterangan": "Hasil mediasi tercatat" },
+      { "nama": "Menyampaikan pemberitahuan putusan perdata", "kategori": "Utama", "output": "1 Relaas", "keterangan": "Pemberitahuan putusan tersampaikan" },
+      { "nama": "Menyusun berkas upaya hukum perdata", "kategori": "Utama", "output": "1 Berkas", "keterangan": "Berkas upaya hukum tersusun" },
+      { "nama": "Mengarsipkan berkas perkara perdata", "kategori": "Pendukung", "output": "1 Berkas", "keterangan": "Berkas perdata tersimpan di ruang arsip" }
+    ]
+  },
+  "hukum": {
+    "label": "Kepaniteraan Hukum & PTSP",
+    "activities": [
+      { "nama": "Memproses permohonan surat keterangan elektronik", "kategori": "Utama", "output": "1 Permohonan", "keterangan": "Permohonan surat keterangan terverifikasi" },
+      { "nama": "Meregister surat kuasa khusus", "kategori": "Utama", "output": "1 Berkas", "keterangan": "Surat kuasa khusus teregister" },
+      { "nama": "Mendaftarkan surat di bawah tangan", "kategori": "Utama", "output": "1 Berkas", "keterangan": "Surat di bawah tangan terdaftar" },
+      { "nama": "Menyusun laporan keadaan perkara bulanan", "kategori": "Utama", "output": "1 Laporan", "keterangan": "Laporan keadaan perkara tersusun" },
+      { "nama": "Mengunggah laporan keadaan perkara bulanan", "kategori": "Utama", "output": "1 Laporan", "keterangan": "Laporan bulanan terunggah" },
+      { "nama": "Menata arsip perkara inaktif", "kategori": "Pendukung", "output": "1 Berkas", "keterangan": "Arsip perkara tertata" },
+      { "nama": "Menata buku perpustakaan hukum", "kategori": "Pendukung", "output": "1 Buku", "keterangan": "Buku perpustakaan tertata" },
+      { "nama": "Melayani informasi publik", "kategori": "Pendukung", "output": "1 Layanan", "keterangan": "Informasi layanan diberikan" },
+      { "nama": "Merekap survei kepuasan masyarakat", "kategori": "Pendukung", "output": "1 Rekap", "keterangan": "Hasil survei terekap" }
+    ]
+  },
+  "sekretaris": {
+    "label": "Pimpinan Kesekretariatan",
+    "activities": [
+      { "nama": "Mengevaluasi pelaksanaan tugas kesekretariatan", "kategori": "Utama", "output": "1 Evaluasi", "keterangan": "Pelaksanaan tugas kesekretariatan dievaluasi" },
+      { "nama": "Menelaah dokumen realisasi anggaran", "kategori": "Utama", "output": "1 Laporan", "keterangan": "Dokumen realisasi anggaran ditelaah" },
+      { "nama": "Mengevaluasi kinerja aparatur kesekretariatan", "kategori": "Pendukung", "output": "1 Evaluasi", "keterangan": "Kinerja aparatur dievaluasi" },
+      { "nama": "Mengikuti rapat pimpinan pengadilan", "kategori": "Pendukung", "output": "1 Kegiatan", "keterangan": "Rapat pimpinan diikuti" }
+    ]
+  },
+  "umum_keuangan": {
+    "label": "Sub Bagian Umum & Keuangan",
+    "activities": [
+      { "nama": "Mencatat agenda surat dinas", "kategori": "Utama", "output": "1 Berkas", "keterangan": "Surat dinas tercatat dalam agenda" },
+      { "nama": "Merekam transaksi keuangan", "kategori": "Utama", "output": "1 Dokumen", "keterangan": "Transaksi keuangan terekam" },
+      { "nama": "Merekonsiliasi kas bendahara", "kategori": "Utama", "output": "1 Laporan", "keterangan": "Saldo kas telah direkonsiliasi" },
+      { "nama": "Memutakhirkan data barang milik negara", "kategori": "Utama", "output": "1 Laporan", "keterangan": "Data barang milik negara diperbarui" },
+      { "nama": "Memeriksa kondisi fasilitas kantor", "kategori": "Pendukung", "output": "1 Pemeriksaan", "keterangan": "Kondisi fasilitas kantor tercatat" },
+      { "nama": "Memeriksa kondisi kendaraan dinas", "kategori": "Pendukung", "output": "1 Pemeriksaan", "keterangan": "Kondisi kendaraan dinas tercatat" }
+    ]
+  },
+  "kepegawaian": {
+    "label": "Sub Bagian Kepegawaian & Ortala",
+    "activities": [
+      { "nama": "Memverifikasi presensi pegawai", "kategori": "Utama", "output": "1 Laporan", "keterangan": "Data presensi pegawai terverifikasi" },
+      { "nama": "Memproses usulan administrasi kepegawaian", "kategori": "Utama", "output": "1 Usulan", "keterangan": "Usulan kepegawaian diproses" },
+      { "nama": "Memutakhirkan dokumen kinerja pegawai", "kategori": "Utama", "output": "1 Berkas", "keterangan": "Dokumen kinerja pegawai diperbarui" },
+      { "nama": "Memutakhirkan data profil pegawai", "kategori": "Utama", "output": "1 Profil", "keterangan": "Data profil pegawai diperbarui" },
+      { "nama": "Mengevaluasi prosedur kerja", "kategori": "Pendukung", "output": "1 Dokumen", "keterangan": "Prosedur kerja dievaluasi" },
+      { "nama": "Menyusun pohon kinerja", "kategori": "Pendukung", "output": "1 Dokumen", "keterangan": "Pohon kinerja tersusun" }
+    ]
+  },
+  "ptip": {
+    "label": "Sub Bagian PTIP",
+    "activities": [
+      { "nama": "Menyinkronkan data perkara", "kategori": "Utama", "output": "1 Laporan", "keterangan": "Data perkara tersinkronisasi" },
+      { "nama": "Mencadangkan basis data perkara", "kategori": "Utama", "output": "1 Berkas", "keterangan": "Cadangan basis data tersimpan" },
+      { "nama": "Memantau koneksi internet kantor", "kategori": "Utama", "output": "1 Laporan", "keterangan": "Kondisi koneksi internet tercatat" },
+      { "nama": "Memperbarui informasi situs pengadilan", "kategori": "Pendukung", "output": "1 Artikel", "keterangan": "Informasi situs diperbarui" },
+      { "nama": "Mendokumentasikan kegiatan kedinasan", "kategori": "Pendukung", "output": "1 Dokumentasi", "keterangan": "Dokumentasi kegiatan tersimpan" },
+      { "nama": "Memelihara perangkat kerja pegawai", "kategori": "Pendukung", "output": "1 Kegiatan", "keterangan": "Perangkat kerja siap digunakan" },
+      { "nama": "Memeriksa perangkat sidang daring", "kategori": "Utama", "output": "1 Laporan", "keterangan": "Perangkat sidang daring siap digunakan" },
+      { "nama": "Membantu penggunaan aplikasi peradilan", "kategori": "Utama", "output": "1 Kegiatan", "keterangan": "Kendala penggunaan aplikasi ditangani" },
+      { "nama": "Mencatat capaian kinerja berkala", "kategori": "Utama", "output": "1 Laporan", "keterangan": "Capaian kinerja tercatat" }
+    ]
+  }
+}

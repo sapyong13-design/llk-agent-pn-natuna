@@ -1,14 +1,15 @@
-let employees = [], templates = {}, active = null, currentPreview = null, currentReport = null, templateStage = null, personalStage = null, busy = false;
+let employees = [], templates = {}, active = null, currentPreview = null, currentReport = null, personalStage = null, verificationStageToken = null, busy = false;
 const loginFlows = new Map();
 let bootstrapFlow = sessionStorage.getItem('bootstrapFlow');
-let supervisorLookupToken=null;
-let verificationRecordingActive = false;
 let verificationTargets = [];
 let loginPollTimer = null;
-const FARIS_ID = '199412162025061006';
-let currentStep = 1;
-let holidayStore = {};
 const editDayState = new Set();
+let calendarDays = new Map();
+let calendarMonth = new Date(2026, new Date().getMonth(), 1);
+let calendarSelection = { start: null, end: null };
+const isoDate = date => [date.getFullYear(), String(date.getMonth() + 1).padStart(2, '0'), String(date.getDate()).padStart(2, '0')].join('-');
+const parseIsoDate = value => { const [year,month,day]=String(value||'').split('-').map(Number); return year ? new Date(year,month-1,day) : null; };
+const formatIndonesianDate = value => value ? new Intl.DateTimeFormat('id-ID',{weekday:'short',day:'numeric',month:'short',year:'numeric'}).format(parseIsoDate(value)) : 'Belum dipilih';
 const $ = selector => document.querySelector(selector);
 const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
 
@@ -55,22 +56,14 @@ function syncControls() {
   const completeLoginBtn = $('#completeLoginBtn');
   const cancelLoginBtn = $('#cancelLoginBtn');
   const submitBtn = $('#submitBtn');
-  const templateApplyBtn = $('#templateApplyBtn');
   const applyPersonalTemplateBtn = $('#applyPersonalTemplateBtn');
-  const startVerificationRecordingBtn = $('#startVerificationRecordingBtn');
-  const finishVerificationRecordingBtn = $('#finishVerificationRecordingBtn');
   const deleteConfirmBtn = $('#deleteConfirmBtn');
 
   if (loginBtn) loginBtn.disabled = busy || flow === 'waiting' || flow === 'completing';
   if (completeLoginBtn) completeLoginBtn.disabled = busy || flow !== 'waiting';
   if (cancelLoginBtn) cancelLoginBtn.disabled = busy || (flow !== 'waiting' && flow !== 'completing');
-  if (submitBtn) {const supervisor=previewSupervisor(currentPreview);submitBtn.disabled = busy || !currentPreview || !$('#confirmCheck')?.checked || !supervisor.name || !supervisor.nip;}
-  if (templateApplyBtn) templateApplyBtn.disabled = busy || !templateStage || !$('#templateConfirm')?.checked;
+  if (submitBtn) submitBtn.disabled = busy || !currentPreview || !$('#confirmCheck')?.checked;
   if (applyPersonalTemplateBtn) applyPersonalTemplateBtn.disabled = busy || !personalStage || !$('#personalStageConfirm')?.checked;
-  if (startVerificationRecordingBtn) startVerificationRecordingBtn.disabled = busy || verificationRecordingActive;
-  if (finishVerificationRecordingBtn) finishVerificationRecordingBtn.disabled = busy || !verificationRecordingActive;
-  const runAutomaticVerificationBtn = $('#runAutomaticVerificationBtn');
-  if (runAutomaticVerificationBtn) runAutomaticVerificationBtn.disabled = busy || !verificationTargets.length;
   if (deleteConfirmBtn) deleteConfirmBtn.disabled = busy || $('#deleteConfirm')?.value !== (active?.id || 'HAPUS');
 }
 
@@ -120,30 +113,29 @@ async function runBusy(action, operationName = 'Operasi') {
 async function loadTemplates() {
   templates = await api('/api/templates');
   const groups = templates.departments || templates.templates || templates;
-  for (const select of [$('#departmentSelect'), $('#workTemplateSelect'), $('#generalTemplateSelect')]) {
-    if (!select) continue;
-    select.innerHTML = Object.entries(groups)
-      .filter(([, value]) => value && typeof value === 'object' && Array.isArray(value.activities))
-      .map(([key, value]) => `<option value="${escapeHtml(key)}">${escapeHtml(value.label)}</option>`)
-      .join('');
-  }
+  const options = Object.entries(groups)
+    .filter(([, value]) => value && typeof value === 'object' && Array.isArray(value.activities))
+    .map(([key, value]) => `<option value="${escapeHtml(key)}">${escapeHtml(value.label)}</option>`).join('');
+  for (const select of [$('#generalTemplateSelect'), $('#sourceDepartmentSelect')]) if (select) select.innerHTML = options;
   renderGeneralTemplate($('#generalTemplateSelect')?.value);
-  const versionNode = $('#templateVersion');
-  if (versionNode) versionNode.textContent = templates.version || templates.meta?.version || 'standar';
+}
+
+function activityRows(activities, sourceLabel) {
+  return activities.length ? activities.map(activity => `
+    <tr>
+      <td><strong>${escapeHtml(activity.description || activity.nama)}</strong></td>
+      <td>${escapeHtml(activity.start || '—')} – ${escapeHtml(activity.end || '—')}</td>
+      <td>${escapeHtml(activity.type || activity.kategori || 'Pendukung')}</td>
+      <td>Selesai</td>
+      <td><small>${escapeHtml(activity.count ? `${activity.count}x` : sourceLabel)}</small></td>
+    </tr>`).join('') : '<tr><td colspan="5" class="emp-pos">Belum ada kegiatan pada sumber ini.</td></tr>';
 }
 
 function renderGeneralTemplate(key) {
   const groups = templates.departments || templates.templates || templates;
-  const group = groups?.[key];
-  const tbody = $('#generalTemplateBody');
-  if (!tbody) return;
-  tbody.innerHTML = group?.activities?.length ? group.activities.map(activity => `
-    <tr>
-      <td><strong>${escapeHtml(activity.nama)}</strong></td>
-      <td>${escapeHtml(activity.kategori || 'Pendukung')}</td>
-      <td>${escapeHtml(activity.output || activity.keterangan || '—')}</td>
-    </tr>
-  `).join('') : '<tr><td colspan="3" class="emp-pos">Belum ada kegiatan standar.</td></tr>';
+  const group = groups?.[key], tbody = $('#activityTemplateBody');
+  if (tbody) tbody.innerHTML = activityRows(group?.activities || [], 'template umum');
+  const badge = $('#activityTemplateBadge'); if (badge) badge.textContent = group?.label || 'Template umum';
 }
 
 $('#generalTemplateSelect')?.addEventListener('change', event => renderGeneralTemplate(event.target.value));
@@ -173,52 +165,29 @@ async function loadEmployees() {
   renderEmployeeList();
 }
 
-function resolveDefaultEmployee(list) {
-  if (!Array.isArray(list) || !list.length) return null;
-  return list.find(emp => String(emp.id) === FARIS_ID || String(emp.nip) === FARIS_ID) || list[0];
-}
 
 async function loadApp() {
   log('Memulai LLK Agent…');
-  const [settings] = await Promise.all([api('/api/settings'), loadTemplates(), loadEmployees()]);
-  const satker = settings.satker || 'Pengadilan Negeri Natuna';
-  const known = satker === 'Pengadilan Negeri Natuna';
-  $('#satkerSelect').value = known ? satker : 'other';
-  $('#customSatker').hidden = known;
-  $('#customSatker').value = known ? '' : satker;
-  const initial = resolveDefaultEmployee(employees);
+  await Promise.all([loadTemplates(), loadEmployees(), loadCalendar()]);
+  const initial = employees[0] || null;
+  const satker = initial?.satker || '';
+  $('#satkerSelect').textContent = satker || 'Satker lainnya';
   if (initial) selectEmployee(initial);
-  if ($('#workTemplateSelect') && initial?.department) $('#workTemplateSelect').value = initial.department;
-  log(`Sistem siap. Satker: ${satker}. Profil aktif: ${initial?.name || 'Belum dipilih'}`);
+  log(`Sistem siap. Satker: ${satker || 'Satker lainnya'}. Profil aktif: ${initial?.name || 'Belum dipilih'}`);
   const bootstrapStatus = await api('/api/bootstrap/status').catch(() => ({ active: [] }));
   const pendingBootstrap = bootstrapStatus.active?.[0];
   if (pendingBootstrap) {
     bootstrapFlow = pendingBootstrap.tempId;
     sessionStorage.setItem('bootstrapFlow', bootstrapFlow);
-    $('#employeeForm').hidden = false;
+    setNewProfileMode(true);
     $('#quickSsoLoginBtn').hidden = true;
     $('#quickSsoFetchBtn').hidden = false;
     feedback(pendingBootstrap.fetchedAt ? 'Sesi Edge tetap aktif. Klik Saya sudah login untuk mengambil ulang daftar LLK.' : 'Sesi login Edge masih aktif. Selesaikan login lalu klik Saya sudah login.');
   }
-  if (initial) {
-    const recordingStatus = await api('/api/navigation-recording/status').catch(() => ({active:false}));
-    const dialog = $('#navigationRecorderDialog');
-    if (recordingStatus.active) {
-      if (dialog && !dialog.open) dialog.showModal();
-      $('#startNavigationRecordingBtn').disabled = true;
-    } else if (!recordingStatus.recorded?.llk && !sessionStorage.getItem('navigationRecorderPrompted')) {
-      sessionStorage.setItem('navigationRecorderPrompted','1');
-      if (dialog && !dialog.open) dialog.showModal();
-      $('#navigationRecorderStatus').textContent = 'Pilih Daftar LLK atau Daftar Verifikasi. Edge akan dibuka otomatis; Anda cukup login dan membuka daftar yang benar.';
-      setTimeout(() => $('#startNavigationRecordingBtn')?.click(), 0);
-    }
-  }
 }
-
 function renderLoginFlow() {
   const state = (active && loginFlows.get(active.id)) || 'idle';
   const waiting = state === 'waiting' || state === 'completing';
-  const loginFlow = $('#loginFlow');
   const loginBtn = $('#loginBtn');
   const completeLoginBtn = $('#completeLoginBtn');
   const cancelLoginBtn = $('#cancelLoginBtn');
@@ -228,7 +197,6 @@ function renderLoginFlow() {
   if (loginBtn) loginBtn.hidden = waiting;
   if (completeLoginBtn) completeLoginBtn.hidden = !waiting;
   if (cancelLoginBtn) cancelLoginBtn.hidden = !waiting;
-  if (loginFlow) loginFlow.dataset.state = state;
 
   if (detail) {
     detail.textContent = state === 'waiting'
@@ -253,7 +221,6 @@ function stopLoginPolling() {
   loginPollTimer = null;
 }
 function setWizardStep(step) {
-  currentStep = step;
   document.querySelectorAll('.workflow-step[data-step]').forEach(node => {
     const n = Number(node.dataset.step);
     node.classList.toggle('is-active', n === step);
@@ -325,20 +292,8 @@ function pollLogin(employeeId) {
 }
 
 function renderLoginCompletion(result) {
-  const account = result.identity || result.accountIdentity || result.account || result.verifier?.verifier || {};
-  const relationships = result.verifier?.employees || result.employees || result.verifiableEmployees || result.relationships || result.verifierRelationships || [];
   const staged = result.history || result.personalTemplateStage || result.personalTemplate || result.stagedPersonalTemplate || result.stage;
-  const accountText = `${account.name || 'Akun LLK'}${account.nip ? ` · ${account.nip}` : ''}`;
 
-  const accountIdNode = $('#accountIdentity');
-  if (accountIdNode) accountIdNode.textContent = accountText;
-
-  const verifierReview = $('#verifierReview');
-  if (verifierReview) {
-    verifierReview.hidden = false;
-    verifierReview.innerHTML = `<p><strong>Akun terautentikasi:</strong> ${escapeHtml(accountText)}</p><p class="field-help">Relasi verifikasi:</p>${relationships.length ? `<ul>${relationships.map(person => `<li>${escapeHtml(person.name || '—')} · ${escapeHtml(person.nip || '—')} <small>ID rute: ${escapeHtml(person.routeId || person.rowId || person.id || '—')}</small></li>`).join('')}</ul>` : '<p>Tak ada relasi pegawai ditemukan.</p>'}`;
-    if (result.warning) verifierReview.innerHTML += `<p class="validation-feedback">${escapeHtml(result.warning)}</p>`;
-  }
 
   const loginCompletionReview = $('#loginCompletionReview');
   if (loginCompletionReview) {
@@ -356,19 +311,11 @@ function selectEmployee(employee) {
   currentReport = null;
   personalStage = null;
   setWizardStep(2);
-  const satker = employee?.satker || 'Pengadilan Negeri Natuna';
-  const known = satker === 'Pengadilan Negeri Natuna';
+  const satker = employee?.satker || '';
   const select = $('#satkerSelect');
-  const custom = $('#customSatker');
-  if (select) select.value = known ? satker : 'other';
-  if (custom) {
-    custom.hidden = known;
-    custom.value = known ? '' : satker;
-  }
-  const stageBox = $('#personalStageBox');
-  if (stageBox) stageBox.hidden = true;
-  const stageConfirm = $('#personalStageConfirm');
-  if (stageConfirm) stageConfirm.checked = false;
+  if (select) select.textContent = satker || 'Terisi otomatis setelah login SSO';
+  const picker=$('#profilePicker');
+  if(picker){picker.hidden=employees.length===0;picker.innerHTML=employees.map(item=>`<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)} · ${escapeHtml(item.nip||item.id)} · Atasan: ${escapeHtml(item.supervisor?.name||item.supervisor?.nip||'Belum terbaca')}</option>`).join('');picker.value=employee.id;}
 
   renderEmployeeList();
 
@@ -379,9 +326,7 @@ function selectEmployee(employee) {
   if (titleNode) titleNode.textContent = employee.name;
 
   const positionNode = $('#profilePosition');
-  if (positionNode) positionNode.textContent = employee.position;
-  const workTemplateSelect = $('#workTemplateSelect');
-  if (workTemplateSelect && employee.department) workTemplateSelect.value = employee.department;
+  if (positionNode) positionNode.textContent = `${employee.position}${employee.satker && employee.satker !== 'Satker Lain' ? ` · ${employee.satker}` : ' · Satker belum terdeteksi dari LLK'}`;
 
   const activeNameNode = $('#activeProfileName');
   if (activeNameNode) activeNameNode.textContent = `${employee.name} (${employee.nip || employee.id})`;
@@ -389,8 +334,6 @@ function selectEmployee(employee) {
   const loginBadge = $('#loginBadge');
   if (loginBadge) loginBadge.textContent = 'Belum masuk';
 
-  const auditStats = $('#auditStats');
-  if (auditStats) auditStats.hidden = true;
 
   const previewArea = $('#previewArea');
   if (previewArea) previewArea.hidden = true;
@@ -404,8 +347,6 @@ function selectEmployee(employee) {
   const confirmCheck = $('#confirmCheck');
   if (confirmCheck) confirmCheck.checked = false;
 
-  const accountId = $('#accountIdentity');
-  if (accountId) accountId.textContent = employee.accountIdentity?.name || 'Belum diverifikasi';
 
   const delGroup = $('#deleteConfirmGroup');
   if (delGroup) delGroup.hidden = true;
@@ -507,11 +448,6 @@ function updatePreviewStatuses(preview, report = null) {
   validatePreview(preview || []);
 }
 
-function previewSupervisor(preview){
-  const day=preview?.[0]||{};
-  const supervisor=day.verifier||day.supervisor||active?.verifier||active?.supervisor||{};
-  return {name:String(supervisor.name||'').trim(),nip:String(supervisor.nip||supervisor.id||supervisor.routeId||'').trim()};
-}
 
 function renderPreview(preview) {
   currentPreview = preview;
@@ -523,17 +459,13 @@ function renderPreview(preview) {
 
   const countNode = $('#previewCount');
   if (countNode) countNode.textContent = `${preview.length} hari`;
-  const supervisor=previewSupervisor(preview);
-  const supervisorBox=$('#supervisorConfirmation');
-  if(supervisorBox)supervisorBox.innerHTML=supervisor.name&&supervisor.nip
-    ? `<p><strong>Atasan yang akan menerima LLK:</strong><br>${escapeHtml(supervisor.name)} · NIP ${escapeHtml(supervisor.nip)}</p>`
-    : '<p class="validation-feedback"><strong>Identitas atasan belum lengkap.</strong> Perbaiki profil sebelum mengirim LLK.</p>';
 
   const container = $('#previewCards');
   if (container) {
     container.innerHTML = preview.map((day, di) => {
       const isEditing = editDayState.has(di);
       const verifier = day.verifier || day.supervisor || active?.verifier || active?.supervisor || {};
+      const verifiedSupervisor = verifier.verified === true && (verifier.source === 'llk-form' || verifier.source === 'llk-select2' || verifier.source === 'llk-api');
       return `
         <article class="day-card" data-day="${di}">
           <header class="day-card-header">
@@ -542,7 +474,8 @@ function renderPreview(preview) {
                 <strong class="day-date">${escapeHtml(day.date)}</strong>
                 <span class="preview-status status-ready" data-day-status="${di}">Siap</span>
               </div>
-              <small class="day-meta">Atasan: ${escapeHtml(verifier.name || 'Belum diketahui')} · NIP ${escapeHtml(verifier.nip || verifier.id || verifier.routeId || '—')}</small>
+              <small class="day-meta ${verifiedSupervisor ? 'supervisor-verified' : 'supervisor-unverified'}">Atasan: ${escapeHtml(verifier.name || 'Belum diverifikasi')} · NIP ${escapeHtml(verifier.nip || verifier.id || verifier.routeId || '—')} <span class="supervisor-source">${verifiedSupervisor ? 'Terverifikasi dari LLK' : 'Belum terverifikasi'}</span></small>
+              <small class="day-meta">Kegiatan: ${day.activitySource === 'llk-page-1' ? 'halaman terakhir LLK' : 'template umum'}</small>
             </div>
             <button class="btn btn-sm btn-outline edit-toggle-btn" type="button" data-toggle-edit="${di}">${isEditing ? 'Tutup edit' : 'Edit isian'}</button>
           </header>
@@ -635,48 +568,18 @@ function renderReport(report) {
 }
 
 function renderPersonalTemplate(info) {
-  const isPersonal = info.source === 'personal';
-  const badge = $('#personalTemplateSourceBadge');
-  if (badge) {
-    badge.textContent = isPersonal ? 'Personal' : 'Bagian';
-    badge.className = `court-badge ${isPersonal ? 'tag-badge' : 'tag-support'}`;
-  }
-
-  const sourceText = $('#personalTemplateSourceText');
-  if (sourceText) sourceText.textContent = isPersonal ? 'Riwayat LLK' : `Template Bagian (${info.fallbackLabel || active?.department || 'Default'})`;
-
-  const fallbackText = $('#personalTemplateFallbackText');
-  if (fallbackText) fallbackText.textContent = info.fallbackLabel || active?.department || '—';
-
-  const activities = isPersonal ? (info.activities || []) : [];
-  const countNode = $('#personalTemplateCount');
-  if (countNode) countNode.textContent = `${activities.length} kegiatan`;
-
-  const authAlert = $('#personalTemplateAuthAlert');
-  if (authAlert) authAlert.hidden = true;
-
-  const tbody = $('#personalTemplateBody');
-  if (tbody) {
-    tbody.innerHTML = activities.length ? activities.map(act => `
-      <tr>
-        <td><strong>${escapeHtml(act.description || act.nama)}</strong></td>
-        <td>${escapeHtml(act.start || '—')} – ${escapeHtml(act.end || '—')}</td>
-        <td>${escapeHtml(act.type || act.kategori || 'Utama')}</td>
-        <td>${escapeHtml(act.result || act.output || '—')}</td>
-        <td><small>${act.count ? `${act.count}x` : 'riwayat LLK'}</small></td>
-      </tr>
-    `).join('') : '<tr><td colspan="5" class="emp-pos">Belum ada template personal. Login SSO lalu impor daftar LLK.</td></tr>';
-  }
+  const activities = info.source === 'personal' ? (info.activities || []) : [];
+  const sourceText = $('#personalTemplateSourceText'); if (sourceText) sourceText.textContent = 'Halaman terakhir LLK';
+  const fallbackText = $('#personalTemplateFallbackText'); if (fallbackText) fallbackText.textContent = active?.department || info.fallbackLabel || '—';
+  const countNode = $('#personalTemplateCount'); if (countNode) countNode.textContent = `${activities.length} kegiatan`;
+  const tbody = $('#activityTemplateBody'); if (tbody && document.querySelector('[name="templateViewSource"]:checked')?.value !== 'general') tbody.innerHTML = activityRows(activities, 'halaman LLK');
+  const badge = $('#activityTemplateBadge'); if (badge && document.querySelector('[name="templateViewSource"]:checked')?.value !== 'general') badge.textContent = 'Halaman LLK';
 }
 
 async function loadPersonalTemplate(employeeId) {
   if (!employeeId) return;
-  try {
-    const info = await api(`/api/employees/${employeeId}/personal-template`);
-    renderPersonalTemplate(info);
-  } catch (error) {
-    log(`Gagal memuat template personal: ${error.message}`);
-  }
+  try { renderPersonalTemplate(await api(`/api/employees/${employeeId}/personal-template`)); }
+  catch (error) { log(`Gagal memuat daftar halaman LLK: ${error.message}`); }
 }
 
 function renderPersonalDiff(staged) {
@@ -728,184 +631,151 @@ function downloadJson(data, filename) {
   URL.revokeObjectURL(url);
 }
 
-function setDatePreset(type) {
-  const now = new Date();
-  const formatDate = d => {
-    const year = d.getFullYear();
-    const month = String(d.getMonth() + 1).padStart(2, '0');
-    const day = String(d.getDate()).padStart(2, '0');
-    return `${year}-${month}-${day}`;
-  };
-
-  let start = new Date(now);
-  let end = new Date(now);
-
-  if (type === 'today') {
-    // default single day
-  } else if (type === 'week') {
-    const day = now.getDay();
-    const diffToMonday = (day === 0 ? -6 : 1) - day;
-    start.setDate(now.getDate() + diffToMonday);
-    end = new Date(start);
-    end.setDate(start.getDate() + 4);
-  } else if (type === 'month') {
-    start = new Date(now.getFullYear(), now.getMonth(), 1);
-    end = new Date(now.getFullYear(), now.getMonth() + 1, 0);
-  }
-
-  const startInput = $('#startDate');
-  const endInput = $('#endDate');
-  if (startInput) startInput.value = formatDate(start);
-  if (endInput) endInput.value = formatDate(end);
+async function loadCalendar() {
+  const calendar = await api('/api/calendar/2026');
+  calendarDays = new Map((calendar.days || []).map(day => [day.date, day]));
+  renderCalendar();
 }
 
-// Event Listeners
-function openEmployeeForm() {
-  const form = $('#employeeForm');
-  if (!form) return;
-  form.hidden = !form.hidden;
-  if (!form.hidden) {
-    form.reset();
-    $('#quickSsoFetchBtn').hidden = true;
-    form.elements.supervisorNip?.focus();
+function updateCalendarSelection(start, end = start) {
+  calendarSelection = { start, end };
+  const startInput = $('#startDate'), endInput = $('#endDate');
+  if (startInput) startInput.value = start || '';
+  if (endInput) endInput.value = end || '';
+  const startLabel = $('#startDateLabel'), endLabel = $('#endDateLabel');
+  if (startLabel) startLabel.textContent = formatIndonesianDate(start);
+  if (endLabel) endLabel.textContent = formatIndonesianDate(end);
+  renderCalendar();
+}
+
+function renderCalendar() {
+  const grid = $('#calendarGrid');
+  if (!grid) return;
+  const year = calendarMonth.getFullYear(), month = calendarMonth.getMonth();
+  $('#calendarMonthTitle').textContent = new Intl.DateTimeFormat('id-ID',{month:'long',year:'numeric'}).format(calendarMonth);
+  const firstWeekday = (new Date(year,month,1).getDay()+6)%7;
+  const lastDay = new Date(year,month+1,0).getDate();
+  const today = isoDate(new Date());
+  const cells = Array.from({length:firstWeekday},()=>'<span class="calendar-empty"></span>');
+  let excluded = 0;
+  for (let day=1; day<=lastDay; day++) {
+    const date = new Date(year,month,day), iso = isoDate(date), weekday = date.getDay();
+    const official = calendarDays.get(iso), weekend = weekday===0 || weekday===6;
+    const disabled = iso > today || weekend || Boolean(official);
+    const selected = calendarSelection.start && iso>=calendarSelection.start && iso<=(calendarSelection.end||calendarSelection.start);
+    if (selected && disabled) excluded++;
+    const type = official?.type || (weekend ? 'weekend' : 'workday');
+    const title = official?.label || (weekend ? (weekday===6?'Sabtu':'Minggu') : 'Hari kerja');
+    cells.push(`<button type="button" class="calendar-day is-${type}${selected?' is-selected':''}${iso===calendarSelection.start?' is-start':''}${iso===calendarSelection.end?' is-end':''}" data-calendar-date="${iso}" ${disabled?'disabled':''} aria-label="${escapeHtml(`${day} ${title}${selected?', dipilih':''}`)}"><strong>${day}</strong>${official?`<small>${official.type==='collective'?'Cuti':'Libur'}</small>`:weekend?'<small>Libur</small>':''}</button>`);
   }
+  grid.innerHTML = cells.join('');
+  const summary = $('#calendarSummary');
+  if (summary) summary.textContent = calendarSelection.start ? `${formatIndonesianDate(calendarSelection.start)} – ${formatIndonesianDate(calendarSelection.end)}${excluded ? ` · ${excluded} hari nonkerja otomatis dilewati` : ''}` : 'Pilih tanggal mulai dan selesai.';
+  $('#calendarPrevBtn').disabled = year===2026 && month===0;
+  $('#calendarNextBtn').disabled = year===2026 && month===11;
+}
+
+function setDatePreset(type) {
+  const now = new Date();
+  let start = new Date(now), end = new Date(now);
+  const nonwork = date => date.getDay()===0 || date.getDay()===6 || calendarDays.has(isoDate(date));
+  if (type === 'today') {
+    while (nonwork(start)) start.setDate(start.getDate()-1);
+    end = new Date(start);
+  } else if (type === 'week') {
+    const day = now.getDay(), diffToMonday = (day === 0 ? -6 : 1) - day;
+    start.setDate(now.getDate() + diffToMonday); end = new Date(start); end.setDate(start.getDate() + 4);
+  } else if (type === 'month') {
+    start = new Date(now.getFullYear(), now.getMonth(), 1); end = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+  }
+  calendarMonth = new Date(start.getFullYear(),start.getMonth(),1);
+  updateCalendarSelection(isoDate(start), isoDate(end));
+}
+
+$('#calendarGrid')?.addEventListener('click', event => {
+  const button = event.target.closest('[data-calendar-date]');
+  if (!button) return;
+  const date = button.dataset.calendarDate;
+  if (!calendarSelection.start || calendarSelection.end) updateCalendarSelection(date, null);
+  else if (date < calendarSelection.start) updateCalendarSelection(date, calendarSelection.start);
+  else updateCalendarSelection(calendarSelection.start, date);
+});
+$('#calendarPrevBtn')?.addEventListener('click',()=>{calendarMonth=new Date(2026,calendarMonth.getMonth()-1,1);renderCalendar();});
+$('#calendarNextBtn')?.addEventListener('click',()=>{calendarMonth=new Date(2026,calendarMonth.getMonth()+1,1);renderCalendar();});
+
+// Event Listeners
+function setNewProfileMode(open) {
+  const form = $('#employeeForm'), chip = $('.profile-chip'), picker = $('#profilePicker'), button = $('#newEmployee'), workspace = $('#workspace');
+  if (!form) return;
+  form.hidden = !open;
+  if (chip) chip.hidden = open;
+  if (picker) picker.hidden = open || !employees.length;
+  if (workspace) workspace.hidden = open || !active;
+  if (button) { button.textContent = open ? 'Batal' : 'Tambah profil'; button.classList.toggle('btn-outline', open); button.classList.toggle('btn-primary', !open); }
+  if (open) {
+    form.reset();
+    $('#quickSsoLoginBtn').hidden = false;
+    $('#quickSsoFetchBtn').hidden = true;
+    $('#satkerSelect').textContent = 'Terisi setelah login SSO';
+    form.elements.supervisorNip?.focus();
+  } else if (active) selectEmployee(active);
+  else $('#satkerSelect').textContent = 'Satker lainnya';
+}
+
+function openEmployeeForm() {
+  setNewProfileMode($('#employeeForm')?.hidden !== true ? false : true);
 }
 
 $('#newEmployee')?.addEventListener('click', openEmployeeForm);
-$('#openVerificationScanRecorderBtn')?.addEventListener('click', () => {
-  if (!active) return feedback('Pilih profil verifikator terlebih dahulu.', true);
-  $('#verificationScanRecorderDialog')?.showModal();
-  $('#startVerificationScanRecordingBtn').disabled = false;
-  $('#finishVerificationScanRecordingBtn').disabled = true;
-});
 
-$('#startVerificationScanRecordingBtn')?.addEventListener('click', () => active && runBusy(async () => {
-  const result = await api('/api/verification-scan-recording/start', {method:'POST',body:JSON.stringify({employeeId:active.id})});
-  $('#startVerificationScanRecordingBtn').disabled = true;
-  $('#finishVerificationScanRecordingBtn').disabled = false;
-  $('#verificationScanRecorderStatus').textContent = `Merekam ${result.url}. Pilih Belum Terverifikasi dan klik Cari di Edge.`;
-}, 'Mulai Rekam Pemindaian'));
-
-$('#finishVerificationScanRecordingBtn')?.addEventListener('click', () => runBusy(async () => {
-  const result = await api('/api/verification-scan-recording/finish', {method:'POST',body:'{}'});
-  $('#startVerificationScanRecordingBtn').disabled = false;
-  $('#finishVerificationScanRecordingBtn').disabled = true;
-  $('#verificationScanRecorderStatus').textContent = `Terekam: ${result.rows} baris, ${result.requests} request.`;
-  log(`Pemindaian verifikasi direkam: ${result.rows} baris.`);
-}, 'Selesai Rekam Pemindaian'));
-
-
-$('#openVerificationRecorderBtn')?.addEventListener('click', () => {
-  if (!active) {
-    feedback('Pilih profil atasan/verifikator terlebih dahulu.', true);
-    return;
-  }
-  $('#verificationRecorderDialog')?.showModal();
-});
-
-$('#startVerificationRecordingBtn')?.addEventListener('click', () => runBusy(async () => {
-  if (!active) throw new Error('Pilih profil atasan/verifikator terlebih dahulu');
-  const result = await api('/api/verification-recording/start', {
-    method: 'POST',
-    body: JSON.stringify({ employeeId: active.id, customMessage: $('#verificationCustomMessage')?.value || '' })
-  });
-  verificationRecordingActive = true;
-  syncControls();
-  $('#verificationRecorderStatus').textContent = `Merekam sejak ${new Date(result.startedAt).toLocaleTimeString('id-ID')}. Lakukan satu verifikasi di Edge, lalu klik Selesai Rekam.`;
-}, 'Mulai Rekam Verifikasi'));
-
-$('#finishVerificationRecordingBtn')?.addEventListener('click', () => runBusy(async () => {
-  const result = await api('/api/verification-recording/finish', { method: 'POST', body: '{}' });
-  verificationRecordingActive = false;
-  syncControls();
-  $('#verificationRecorderStatus').textContent = `Rekaman selesai: ${result.url}`;
-  log('Alur verifikasi LLK selesai direkam.');
-}, 'Selesai Rekam Verifikasi'));
-$('#previewAutomaticVerificationBtn')?.addEventListener('click', () => active && runBusy(async () => {
-  const result = await api(`/api/verification/preview?employeeId=${encodeURIComponent(active.id)}`);
-  verificationTargets = (result.targets || []).filter(item => item.valid !== false);
-  $('#verificationTargetCount').textContent = `${result.validCount ?? verificationTargets.length} siap · ${result.invalidCount || 0} belum benar`;
-  const preview = $('#verificationTargetPreview');
-  preview.hidden = false;
-  const allTargets = [...(result.targets || []), ...(result.invalidTargets || [])];
-  preview.innerHTML = allTargets.length
-    ? `<ul>${allTargets.map(item => `<li><strong>${item.valid === false ? 'BELUM BENAR' : 'SIAP'}</strong> ${escapeHtml(item.date || 'Tanggal tidak terbaca')} — ${escapeHtml(item.summary)}${item.issues?.length ? `<br><small>${escapeHtml(item.issues.join('; '))}</small>` : ''}</li>`).join('')}</ul>`
-    : '<p>Tidak ada LLK dengan tag Belum Diverifikasi.</p>';
-  syncControls();
-}, 'Pindai Verifikasi'));
-
-$('#runAutomaticVerificationBtn')?.addEventListener('click', () => active && runBusy(async () => {
-  const message = String($('#verificationCustomMessage')?.value || '').trim();
-  if (!message) throw new Error('Isi pesan custom terlebih dahulu');
-  if (!verificationTargets.length) throw new Error('Pindai target terlebih dahulu');
-  const result = await api('/api/verification/run', {
-    method: 'POST',
-    body: JSON.stringify({ employeeId: active.id, message, hllk: verificationTargets.map(item => item.hllk) })
-  });
-  verificationTargets = [];
-  $('#verificationTargetCount').textContent = `${result.success}/${result.total} berhasil`;
-  $('#verificationTargetPreview').innerHTML = `<p>${result.success} LLK berhasil diverifikasi${result.failed ? `; ${result.failed} gagal` : ''}.</p>`;
-  syncControls();
-  log(`Verifikasi otomatis selesai: ${result.success}/${result.total} berhasil.`);
-}, 'Verifikasi Otomatis'));
-
+function verificationList(items, state = 'ready') {
+  if (!items.length) return '';
+  return `<ol class="verification-list">${items.map((item, index) => {
+    const ready = state === 'ready' ? item.valid !== false : item.success;
+    const label = state === 'ready' ? (ready ? 'Siap' : 'Ditahan') : (ready ? 'Berhasil' : 'Gagal');
+    const detail = state === 'ready' ? (item.issues?.join('; ') || item.summary) : (item.error || (ready ? 'Berhasil diproses.' : `HTTP ${item.status || '—'}`));
+    return `<li class="verification-item verification-item--${ready ? 'ready' : 'failed'}"><span class="verification-number">${index + 1}</span><div class="verification-item-body"><div class="verification-item-head"><strong>${escapeHtml(item.date || item.hllk || 'Target tanpa tanggal')}</strong><span class="verification-status">${label}</span></div>${state === 'ready' && item.hllk ? `<code class="verification-id">ID LLK ${escapeHtml(item.hllk)}</code>` : ''}<p>${escapeHtml(detail || 'Rincian LLK tidak tersedia.')}</p></div></li>`;
+  }).join('')}</ol>`;
+}
 
 async function refreshWizardVerification() {
   if (!active) return;
   const result = await api(`/api/verification/preview?employeeId=${encodeURIComponent(active.id)}`);
-  verificationTargets = result.targets || [];
+  verificationTargets = (result.targets || []).filter(item => item.valid !== false); verificationStageToken = result.stageToken || null;
   const count = $('#wizardVerificationCount');
-  if (count) count.textContent = `${result.total} LLK belum terverifikasi di halaman 1`;
+  if (count) count.textContent = `${result.validCount ?? verificationTargets.length} LLK siap diverifikasi · filter Belum Terverifikasi berdasarkan NIP terbukti aktif`;
   const preview = $('#wizardVerificationPreview');
-  if (preview) preview.innerHTML = verificationTargets.length
-    ? `<p><strong>${result.total} LLK anggota pada halaman 1 siap diverifikasi.</strong></p><ul>${verificationTargets.map(item => `<li><code>${escapeHtml(item.hllk)}</code> ${escapeHtml(item.summary)}</li>`).join('')}</ul>`
-    : '<p>Tidak ada LLK anggota berstatus Belum Terverifikasi pada halaman 1.</p>';
-  const run = $('#runWizardVerificationBtn');
-  if (run) run.disabled = !verificationTargets.length;
+  const held = Array.isArray(result.invalidTargets) ? result.invalidTargets : [];
+  if (preview) preview.innerHTML = `<div class="verification-filter"><span>Filter aktif</span><strong>Belum Terverifikasi</strong><span>berdasarkan NIP</span></div>${verificationTargets.length ? `<div class="verification-summary"><strong>${verificationTargets.length}</strong><span>LLK siap diverifikasi</span></div>${verificationList(verificationTargets)}` : '<p class="verification-empty">Tidak ada LLK anggota berstatus Belum Terverifikasi.</p>'}${held.length ? `<div class="verification-held"><strong>${held.length} LLK ditahan</strong><span>Belum lolos pemeriksaan sebelum verifikasi.</span></div>${verificationList(held)}` : ''}`;
+  $('#runWizardVerificationBtn').disabled = !verificationTargets.length;
 }
 
-document.querySelectorAll('[name="workflowMode"]').forEach(input => input.addEventListener('change', () => {
-  const verify = document.querySelector('[name="workflowMode"]:checked')?.value === 'verify';
-  $('#createLlkMode').hidden = verify;
-  $('#verifyLlkMode').hidden = !verify;
-  if (verify) runBusy(refreshWizardVerification, 'Pindai LLK Anggota');
-}));
-
+document.querySelectorAll('[name="workflowMode"]').forEach(input => input.addEventListener('change', () => {const verify = document.querySelector('[name="workflowMode"]:checked')?.value === 'verify';$('#createLlkMode').hidden = verify;$('#verifyLlkMode').hidden = !verify;if (verify) runBusy(refreshWizardVerification, 'Pindai LLK Anggota');}));
 $('#refreshWizardVerificationBtn')?.addEventListener('click', () => runBusy(refreshWizardVerification, 'Pindai LLK Anggota'));
-
 $('#runWizardVerificationBtn')?.addEventListener('click', () => active && runBusy(async () => {
   const message = String($('#wizardVerificationMessage')?.value || '').trim();
   if (!message) throw new Error('Isi pesan verifikasi terlebih dahulu');
-  if (!verificationTargets.length) throw new Error('Tidak ada LLK belum diverifikasi');
-  const result = await api('/api/verification/run', {
-    method: 'POST',
-    body: JSON.stringify({ employeeId: active.id, message, hllk: verificationTargets.map(item => item.hllk) })
-  });
+  if (!verificationTargets.length || !verificationStageToken) throw new Error('Pindai ulang sebelum verifikasi');
+  const result = await api('/api/verification/run', {method: 'POST',body: JSON.stringify({ employeeId: active.id, message, stageToken: verificationStageToken, hllk: verificationTargets.map(item => item.hllk) })});
+  verificationTargets = []; verificationStageToken = null;
+  const failures=result.results.filter(item=>!item.success);
   log(`Verifikasi anggota selesai: ${result.success}/${result.total} berhasil.`);
-  feedback(`${result.success} LLK anggota berhasil diverifikasi${result.failed ? `; ${result.failed} gagal` : ''}.`);
-  await refreshWizardVerification();
+  feedback(`${result.success} LLK anggota berhasil diverifikasi${result.failed ? `; ${result.failed} gagal: ${failures.map(item=>`${item.date||item.hllk} (${item.error||`HTTP ${item.status}`})`).join('; ')}` : ''}.`,Boolean(result.failed));
+  $('#wizardVerificationCount').textContent=`${result.success}/${result.total} selesai${result.failed?`; ${result.failed} gagal`:''}. Pindai ulang hanya jika ingin melihat sisa target.`;
+  $('#wizardVerificationPreview').innerHTML=`<p class="verification-result-summary"><strong>Verifikasi selesai tanpa memindai ulang filter.</strong></p>${verificationList(result.results, 'result')}`;
+  $('#runWizardVerificationBtn').disabled=true;
 }, 'Verifikasi LLK Anggota'));
 
-function updateSatkerUi() {
-  const select = $('#satkerSelect');
-  const custom = $('#customSatker');
-  const isOther = select?.value === 'other';
-  if (custom) custom.hidden = !isOther;
-}
-
-$('#satkerSelect')?.addEventListener('change', () => {
-  updateSatkerUi();
-  if ($('#satkerSelect').value === 'other') $('#customSatker')?.focus();
-});
 
 async function fetchBootstrapProfile() {
-  if (!bootstrapFlow) throw new Error('Buka SSO terlebih dahulu');
+  if (!bootstrapFlow) throw new Error('Sesi bootstrap tidak aktif. Klik Tambah profil untuk menghubungkan sesi Edge yang masih login.');
   const out = await api('/api/bootstrap/complete', {
     method: 'POST',
-    body: JSON.stringify({ tempId: bootstrapFlow })
+    body: JSON.stringify({ tempId: bootstrapFlow, supervisorNip: String($('#quickSupervisorNip')?.value || '').trim() })
   });
-  sessionStorage.setItem('bootstrapFlow', bootstrapFlow);
-  $('#quickSsoFetchBtn').hidden = false;
+  sessionStorage.removeItem('bootstrapFlow');
+  bootstrapFlow = null;
+  setNewProfileMode(false);
   selectEmployee(out.employee);
   loginFlows.set(out.employee.id, 'review');
   const loginBadge = $('#loginBadge');
@@ -919,15 +789,6 @@ async function fetchBootstrapProfile() {
   feedback(`Sesi Edge tetap aktif. ${templateCount} pola kegiatan ditemukan; klik Saya sudah login untuk mengambil ulang.`);
 }
 
-$('#quickSupervisorNip')?.addEventListener('input',()=>{supervisorLookupToken=null;$('#supervisorLookupConfirm').checked=false;$('#supervisorLookupResult').hidden=true;$('#supervisorLookupConfirmRow').hidden=true;});
-$('#lookupSupervisorBtn')?.addEventListener('click',()=>runBusy(async()=>{
-  const nip=String($('#quickSupervisorNip')?.value||'').trim();if(!/^\d{18}$/.test(nip))throw new Error('NIP atasan langsung harus tepat 18 digit angka');
-  log(`Mencari NIP ${nip} di Google Search…`);const result=await api(`/api/supervisor-lookup?nip=${encodeURIComponent(nip)}`);supervisorLookupToken=result.token;
-  const box=$('#supervisorLookupResult');box.hidden=false;box.innerHTML=result.results?.length
-    ? `<p><strong>5 halaman teratas Google untuk NIP ${escapeHtml(nip)}</strong></p>${result.results.map((item,index)=>`<article class="result-card"><strong>${index+1}. ${escapeHtml(item.title)}</strong><p>Nama: <strong>${escapeHtml(item.name||'tidak teridentifikasi')}</strong><br>Jabatan: <strong>${escapeHtml(item.position||'tidak teridentifikasi')}</strong><br>Satker: <strong>${escapeHtml(item.satker||'tidak teridentifikasi')}</strong></p><small>${escapeHtml(item.snippet||'Tidak ada cuplikan.')}</small><p><a href="${escapeHtml(item.url)}" target="_blank" rel="noopener">Buka sumber</a></p></article>`).join('')}<p><a href="${escapeHtml(result.sourceUrl)}" target="_blank" rel="noopener">Buka semua hasil Google</a></p>`
-    : `<p><strong>NIP ${escapeHtml(nip)} tidak ditemukan pada hasil publik Google.</strong></p><p><a href="${escapeHtml(result.sourceUrl)}" target="_blank" rel="noopener">Periksa langsung di Google</a>. Jangan lanjut jika nama dan satker tidak dapat dipastikan.</p>`;
-  $('#supervisorLookupConfirmRow').hidden=false;$('#supervisorLookupConfirm').checked=false;
-},'Pencarian NIP Atasan'));
 
 $('#employeeForm')?.addEventListener('submit', event => {
   event.preventDefault();
@@ -937,15 +798,11 @@ $('#employeeForm')?.addEventListener('submit', event => {
       $('#quickSupervisorNip')?.focus();
       throw new Error('NIP atasan langsung harus tepat 18 digit angka');
     }
-    const selectedSatker = $('#satkerSelect')?.value;
-    const satker = selectedSatker === 'other'
-      ? $('#customSatker')?.value.trim()
-      : selectedSatker;
-    if (!satker) throw new Error('Masukkan satuan kerja terlebih dahulu');
+    const satker = '';
     log('Membuka Edge untuk login SSO dan mengambil profil…');
     const res = await api('/api/bootstrap/login', {
       method: 'POST',
-      body: JSON.stringify({ satker, supervisorNip, department: 'umum_keuangan', supervisorLookupToken, supervisorConfirmed:$('#supervisorLookupConfirm')?.checked===true })
+      body: JSON.stringify({ satker, supervisorNip, department: 'umum_keuangan' })
     });
     bootstrapFlow = res.tempId;
     sessionStorage.setItem('bootstrapFlow', bootstrapFlow);
@@ -957,8 +814,8 @@ $('#employeeForm')?.addEventListener('submit', event => {
 });
 
 $('#quickSsoFetchBtn')?.addEventListener('click', () => runBusy(fetchBootstrapProfile, 'Tarik Data Akun'));
+$('#profilePicker')?.addEventListener('change', event => {const employee=employees.find(item=>item.id===event.target.value);if(employee)selectEmployee(employee);});
 
-updateSatkerUi();
 
 $('#employeeList')?.addEventListener('click', event => {
   const item = event.target.closest('[data-id]');
@@ -1001,55 +858,11 @@ $('#cancelLoginBtn')?.addEventListener('click', () => active && runBusy(async ()
   log(result.message || 'Login dibatalkan.');
 }, 'Batal Login'));
 
-$('#verifyBtn')?.addEventListener('click', () => active && runBusy(async () => {
-  log('Memeriksa status sesi LLK…');
-  const result = await api(`/api/employees/${active.id}/verify`);
-  const badge = $('#loginBadge');
-  if (badge) badge.textContent = result.loggedIn ? 'Login aktif' : 'Belum masuk';
-  if (result.accountIdentity) {
-    const accountNode = $('#accountIdentity');
-    if (accountNode) accountNode.textContent = `${result.accountIdentity.name}${result.accountIdentity.nip ? ` · ${result.accountIdentity.nip}` : ''}`;
-  }
-  log(result.loggedIn ? 'Sesi LLK terkonfirmasi aktif.' : 'Sesi LLK belum aktif.');
-}, 'Periksa Sesi'));
-
-$('#importVerifierBtn')?.addEventListener('click', () => active && runBusy(async () => {
-  log('Mengimpor relasi verifikator dari sistem LLK…');
-  const verified = await api('/api/verifier');
-  const result = await api('/api/verifier/import', { method: 'POST', body: JSON.stringify({ employeeId: active.id }) });
-  const account = result.accountIdentity || verified.accountIdentity || verified.account || {};
-  const accountNode = $('#accountIdentity');
-  if (accountNode) accountNode.textContent = `${account.name || 'Akun LLK'}${account.nip ? ` · ${account.nip}` : ''}`;
-  const people = result.employees || result.verifiableEmployees || verified.employees || verified.verifiableEmployees || [];
-  const review = $('#verifierReview');
-  if (review) {
-    review.hidden = false;
-    review.innerHTML = `<p><strong>Akun:</strong> ${escapeHtml(account.name || '—')}</p><p class="field-help">Pegawai terverifikasi:</p><ul>${people.map(p => `<li>${escapeHtml(p.name)} · ${escapeHtml(p.nip || '—')}</li>`).join('')}</ul>`;
-  }
-  await loadEmployees();
-  log('Data relasi verifikator diperbarui.');
-}, 'Impor Verifikator'));
-
-$('#auditBtn')?.addEventListener('click', () => active && runBusy(async () => {
-  log('Menjalankan audit riwayat LLK…');
-  const r = await api(`/api/employees/${active.id}/audit`);
-  const stats = $('#auditStats');
-  if (stats) stats.hidden = false;
-  const statTotal = $('#statTotal');
-  const statUnique = $('#statUnique');
-  const statDup = $('#statDup');
-  if (statTotal) statTotal.textContent = r.total;
-  if (statUnique) statUnique.textContent = r.unique;
-  if (statDup) statDup.textContent = (r.duplicates || []).length;
-  log(`Audit selesai: ${r.total} total, ${r.unique} unik, ${(r.duplicates || []).length} duplikat.`);
-}, 'Audit'));
 
 $('#confirmCheck')?.addEventListener('change', syncControls);
 
 $('#submitBtn')?.addEventListener('click', () => runBusy(async () => {
   if (!active || !currentPreview || !validatePreview(currentPreview) || !$('#confirmCheck')?.checked) throw new Error('Centang konfirmasi sebelum mengirim ke LLK.');
-  const supervisor=previewSupervisor(currentPreview);
-  if(!supervisor.name||!supervisor.nip)throw new Error('Identitas nama dan NIP atasan belum lengkap. Perbaiki profil sebelum mengirim LLK.');
   const policy = $('#duplicatePolicy')?.value || 'skip';
   log(`Mengirim ${currentPreview.length} hari isian ke LLK…`);
   const report = await api(`/api/employees/${active.id}/submit`, {
@@ -1075,12 +888,6 @@ $('#employeeSearch')?.addEventListener('input', () => {
   renderEmployeeList();
 });
 
-$('#reportBtn')?.addEventListener('click', () => active && runBusy(async () => {
-  log('Memuat laporan pengiriman terakhir…');
-  const rep = await api(`/api/employees/${active.id}/report`);
-  renderReport(rep);
-  log('Laporan pengiriman berhasil dimuat.');
-}, 'Laporan'));
 
 $('#exportReportBtn')?.addEventListener('click', () => {
   if (currentReport) downloadJson(currentReport, `laporan-llk-${active?.id}.json`);
@@ -1094,42 +901,6 @@ $('#clearLogBtn')?.addEventListener('click', () => {
   }
 });
 
-$('#templateDiffBtn')?.addEventListener('click', () => runBusy(async () => {
-  log('Memeriksa riwayat versi template…');
-  const historyResponse = await api('/api/templates/history');
-  const history = Array.isArray(historyResponse) ? historyResponse : historyResponse.history || historyResponse.versions || [];
-  const candidate = history.find(entry => entry.version !== templates.version && entry.departments) || history[0];
-  if (!candidate?.departments) throw new Error('Tidak ada versi template lain untuk ditinjau.');
-  templateStage = await api('/api/templates/diff', { method: 'POST', body: JSON.stringify({ departments: candidate.departments }) });
-  templateStage.departments = candidate.departments;
-  templateStage.toVersion ||= candidate.version;
-  const diffBox = $('#templateDiff');
-  if (diffBox) {
-    diffBox.hidden = false;
-    diffBox.innerHTML = `<p><strong>${escapeHtml(templateStage.fromVersion || templates.version || 'current')} → ${escapeHtml(templateStage.toVersion || 'new')}</strong></p><pre>${escapeHtml(JSON.stringify(templateStage.changes || templateStage.diff || [], null, 2))}</pre>`;
-  }
-  const wrap = $('#templateConfirmWrap');
-  if (wrap) wrap.hidden = false;
-  const chk = $('#templateConfirm');
-  if (chk) chk.checked = false;
-  syncControls();
-  log('Diff template siap ditinjau.');
-}, 'Tinjau Template'));
-
-$('#templateConfirm')?.addEventListener('change', syncControls);
-
-$('#templateApplyBtn')?.addEventListener('click', () => runBusy(async () => {
-  if (!templateStage || !$('#templateConfirm')?.checked) throw new Error('Tinjau diff template terlebih dahulu.');
-  log('Menerapkan template baru…');
-  await api('/api/templates/apply', { method: 'POST', body: JSON.stringify({ departments: templateStage.departments || templates.departments || templates }) });
-  templateStage = null;
-  const diffBox = $('#templateDiff');
-  if (diffBox) diffBox.hidden = true;
-  const wrap = $('#templateConfirmWrap');
-  if (wrap) wrap.hidden = true;
-  await loadTemplates();
-  log('Template berhasil diterapkan.');
-}, 'Terapkan Template'));
 
 $('#deleteEmployeeBtn')?.addEventListener('click', () => {
   if (!active) return;
@@ -1158,12 +929,10 @@ $('#deleteConfirmBtn')?.addEventListener('click', () => active && runBusy(async 
   const grp = $('#deleteConfirmGroup');
   if (grp) grp.hidden = true;
   await loadEmployees();
-  const initial = resolveDefaultEmployee(employees);
-  if (initial) selectEmployee(initial);
+  if (employees[0]) selectEmployee(employees[0]);
   log(`Profil ${deletedId} berhasil dihapus.`);
 }, 'Hapus Profil'));
 
-$('#personalTemplateLoginBtn')?.addEventListener('click', () => $('#loginBtn')?.click());
 
 $('#importPersonalTemplateBtn')?.addEventListener('click', () => active && runBusy(async () => {
   log(`Membaca halaman pertama daftar LLK untuk ${active.name}…`);
@@ -1173,31 +942,23 @@ $('#importPersonalTemplateBtn')?.addEventListener('click', () => active && runBu
   log(`${staged.scannedEntries || 0} entri LLK dibaca dari ${staged.pagesScanned || 1} halaman (${staged.sourceUrl || '/llk'}); ${staged.candidate?.activities?.length || 0} pola unik siap ditinjau.`);
 }, 'Impor Seluruh LLK'));
 
-$('#openNavigationRecorderBtn')?.addEventListener('click', () => {
-  if (!active) return feedback('Pilih profil aktif terlebih dahulu.', true);
-  $('#startNavigationRecordingBtn').disabled = false;
-  $('#finishNavigationRecordingBtn').disabled = true;
-  $('#navigationRecorderStatus').textContent = 'Siap merekam.';
-  $('#navigationRecorderDialog')?.showModal();
-});
 
-$('#startNavigationRecordingBtn')?.addEventListener('click', () => active && runBusy(async () => {
-  const mode = document.querySelector('[name="navigationRecordMode"]:checked')?.value || 'llk';
-  const result = await api('/api/navigation-recording/start', {method:'POST',body:JSON.stringify({employeeId:active.id,mode})});
-  $('#startNavigationRecordingBtn').disabled = true;
-  $('#finishNavigationRecordingBtn').disabled = false;
-  $('#navigationRecorderStatus').textContent = result.message;
-  log(`Perekaman navigasi ${mode} dimulai di ${result.url}.`);
-}, 'Mulai Rekam Navigasi'));
+document.querySelectorAll('[name="activitySource"]').forEach(input => input.addEventListener('change', () => {
+  const general = document.querySelector('[name="activitySource"]:checked')?.value === 'general';
+  $('#sourceDepartmentWrap').hidden = !general;
+  if (general && active?.department) $('#sourceDepartmentSelect').value = active.department;
+}));
 
-$('#finishNavigationRecordingBtn')?.addEventListener('click', () => runBusy(async () => {
-  const result = await api('/api/navigation-recording/finish', {method:'POST',body:'{}'});
-  $('#startNavigationRecordingBtn').disabled = false;
-  $('#finishNavigationRecordingBtn').disabled = true;
-  $('#navigationRecorderStatus').textContent = `Terekam: ${result.clicks} klik, ${result.requests} request, ${result.tables} tabel. URL akhir: ${result.url}`;
-  log(`Navigasi ${result.mode} terekam dari ${result.clicks} klik dan ${result.tables} tabel.`);
-}, 'Selesai Rekam Navigasi'));
-
+document.querySelectorAll('[name="templateViewSource"]').forEach(input => input.addEventListener('change', () => {
+  const general = document.querySelector('[name="templateViewSource"]:checked')?.value === 'general';
+  $('#templateDepartmentWrap').hidden = !general;
+  $('#pageActivitySummary').hidden = general;
+  $('#pageActivityActions').hidden = general;
+  if (general) {
+    if (active?.department) $('#generalTemplateSelect').value = active.department;
+    renderGeneralTemplate($('#generalTemplateSelect').value);
+  } else if (active) loadPersonalTemplate(active.id);
+}));
 $('#personalStageConfirm')?.addEventListener('change', syncControls);
 
 $('#cancelPersonalStageBtn')?.addEventListener('click', () => {
@@ -1207,14 +968,14 @@ $('#cancelPersonalStageBtn')?.addEventListener('click', () => {
   const chk = $('#personalStageConfirm');
   if (chk) chk.checked = false;
   syncControls();
-  log('Peninjauan template personal dibatalkan.');
+  log('Peninjauan daftar kegiatan dibatalkan.');
 });
 
 $('#applyPersonalTemplateBtn')?.addEventListener('click', () => active && runBusy(async () => {
   if (!personalStage || !$('#personalStageConfirm')?.checked) {
-    throw new Error('Centang konfirmasi peninjauan template personal.');
+    throw new Error('Centang konfirmasi peninjauan daftar kegiatan.');
   }
-  log(`Menerapkan template personal untuk ${active.name}…`);
+  log(`Menerapkan daftar kegiatan halaman LLK untuk ${active.name}…`);
   const result = await api(`/api/employees/${active.id}/personal-template/apply`, {
     method: 'POST',
     body: JSON.stringify({ stageToken: personalStage.stageToken, confirm: active.id })
@@ -1225,38 +986,9 @@ $('#applyPersonalTemplateBtn')?.addEventListener('click', () => active && runBus
   const chk = $('#personalStageConfirm');
   if (chk) chk.checked = false;
   renderPersonalTemplate(result);
-  log(`Template personal untuk ${active.name} aktif.`);
+  log(`Daftar kegiatan halaman LLK untuk ${active.name} aktif.`);
   syncControls();
-}, 'Terapkan Template Personal'));
-
-async function loadHolidays() {
-  try {
-    holidayStore = await api('/api/holidays');
-    renderHolidays();
-  } catch (error) {
-    log(`Gagal memuat hari libur: ${error.message}`);
-  }
-}
-
-function renderHolidays() {
-  const container = $('#holidayList');
-  const countNode = $('#holidayCount');
-  const list = Object.entries(holidayStore).flatMap(([yr, dates]) => (Array.isArray(dates) ? dates : []).map(d => ({ yr, date: d }))).sort((a,b) => a.date.localeCompare(b.date));
-  if (countNode) countNode.textContent = `${list.length} hari`;
-  if (!container) return;
-  container.innerHTML = list.length ? list.map(item => `
-    <div class="holiday-item">
-      <span><strong>${escapeHtml(item.date)}</strong> <small>(${escapeHtml(item.yr)})</small></span>
-      <button class="btn btn-sm btn-outline" type="button" data-del-holiday="${escapeHtml(item.date)}" data-del-year="${escapeHtml(item.yr)}">Hapus</button>
-    </div>
-  `).join('') : '<p class="field-help">Belum ada daftar libur.</p>';
-}
-
-async function saveHolidays(updated) {
-  holidayStore = await api('/api/holidays', { method: 'POST', body: JSON.stringify(updated) });
-  renderHolidays();
-  log('Daftar hari libur diperbarui.');
-}
+}, 'Terapkan Daftar Kegiatan'));
 
 $('#loginNextBtn')?.addEventListener('click', () => {
   setWizardStep(2);
@@ -1273,43 +1005,6 @@ $('#previewCards')?.addEventListener('click', event => {
 $('#previewCards')?.addEventListener('input', syncPreviewFromForm);
 $('#previewCards')?.addEventListener('change', syncPreviewFromForm);
 
-$('#holidayForm')?.addEventListener('submit', event => runBusy(async () => {
-  event.preventDefault();
-  const date = $('#holidayDate')?.value;
-  if (!date) return;
-  const year = date.slice(0, 4);
-  const next = { ...holidayStore };
-  next[year] = Array.from(new Set([...(next[year] || []), date])).sort();
-  await saveHolidays(next);
-  $('#holidayDate').value = '';
-}, 'Tambah Libur'));
-
-$('#holidayList')?.addEventListener('click', event => {
-  const btn = event.target.closest('[data-del-holiday]');
-  if (!btn) return;
-  const date = btn.dataset.delHoliday, year = btn.dataset.delYear;
-  runBusy(async () => {
-    const next = { ...holidayStore };
-    if (next[year]) {
-      next[year] = next[year].filter(d => d !== date);
-      await saveHolidays(next);
-    }
-  }, 'Hapus Libur');
-});
-
-$('#holidayImport')?.addEventListener('change', event => {
-  const file = event.target.files?.[0];
-  if (!file) return;
-  const reader = new FileReader();
-  reader.onload = () => runBusy(async () => {
-    const data = JSON.parse(reader.result);
-    const next = Array.isArray(data) ? { "2026": data } : data;
-    await saveHolidays(next);
-  }, 'Impor Libur');
-  reader.readAsText(file);
-});
-
-$('#holidayExport')?.addEventListener('click', () => downloadJson(holidayStore, 'hari-libur.json'));
 $('#newSubmissionBtn')?.addEventListener('click', () => {
   const area = $('#reportArea');
   if (area) area.hidden = true;
@@ -1320,26 +1015,23 @@ $('#previewBtn')?.addEventListener('click', () => active && runBusy(async () => 
   const start = $('#startDate')?.value;
   const end = $('#endDate')?.value;
   if (!start || !end) throw new Error('Tentukan tanggal mulai dan selesai.');
-  const department = $('#workTemplateSelect')?.value;
-  log(`Menyiapkan isian LLK dari ${start} sampai ${end} dengan template ${$('#workTemplateSelect')?.selectedOptions?.[0]?.textContent || department}…`);
+  const source = document.querySelector('[name="activitySource"]:checked')?.value || 'page';
+  const department = source === 'general' ? $('#sourceDepartmentSelect')?.value : undefined;
+  log(`Menyiapkan isian LLK dari ${start} sampai ${end}; sumber: ${source==='general'?'template umum':'halaman terakhir LLK'}…`);
   const preview = await api(`/api/employees/${active.id}/preview`, {
     method: 'POST',
-    body: JSON.stringify({ start, end, department })
+    body: JSON.stringify({ start, end, source, department })
   });
+  await loadEmployees();
+  const refreshed = employees.find(employee => employee.id === active.id);
+  if (refreshed) selectEmployee(refreshed);
   renderPreview(preview);
   setWizardStep(3);
   log(`Pratinjau siap: ${preview.length} hari isian.`);
 }, 'Siapkan LLK'));
 
-const origLoadApp = loadApp;
-loadApp = async function() {
-  await origLoadApp();
-  loadHolidays().catch(() => {});
-};
-
-
 $('#resetPersonalTemplateBtn')?.addEventListener('click', () => active && runBusy(async () => {
-  log(`Mengembalikan template ${active.name} ke default…`);
+  log(`Menghapus daftar halaman LLK tersimpan untuk ${active.name}…`);
   const result = await api(`/api/employees/${active.id}/personal-template`, {
     method: 'DELETE',
     body: JSON.stringify({ confirm: active.id })
@@ -1350,9 +1042,9 @@ $('#resetPersonalTemplateBtn')?.addEventListener('click', () => active && runBus
   const chk = $('#personalStageConfirm');
   if (chk) chk.checked = false;
   renderPersonalTemplate(result);
-  log(`Template ${active.name} dikembalikan ke default.`);
+  log(`Daftar halaman LLK ${active.name} dihapus.`);
   syncControls();
-}, 'Reset Template Personal'));
+}, 'Hapus Daftar Kegiatan'));
 
 document.addEventListener('DOMContentLoaded', () => {
   setDatePreset('today');

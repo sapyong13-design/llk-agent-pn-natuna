@@ -56,7 +56,7 @@ async function backup() {
 async function rotate() {
   const keep = Number(process.env.REPORT_KEEP || 20);
   if (!Number.isInteger(keep) || keep < 1 || keep > 1000) return fail('REPORT_KEEP harus berupa angka 1-1000.');
-  const locations = [join(root, 'data'), join(root, 'reports')];
+  const locations = [join(root, 'data')];
   const reports = [];
   for (const dir of locations) {
     if (!existsSync(dir)) continue;

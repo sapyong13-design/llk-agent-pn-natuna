@@ -24,4 +24,4 @@ Aplikasi pendamping otomasi laporan lembar kerja dan verifikasi LLK Mahkamah Agu
 ## Fitur Utama
 - **Otomasi Pengisian LLK**: Generator log kegiatan bulanan/mingguan sesuai bidang tugas pegawai.
 - **Verifikasi LLK Anggota**: Pemindaian target halaman 1 dan verifikasi dengan catatan custom.
-- **Isolasi Profil Satker**: Setiap pegawai menyimpan konteks satuan kerja masing-masing secara independen.
+- **Isolasi Profil Pegawai**: Setiap pegawai memiliki profil browser terpisah; satuan kerja dibaca otomatis dari akun LLK.

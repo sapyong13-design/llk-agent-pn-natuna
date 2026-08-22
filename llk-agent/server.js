@@ -1,5 +1,5 @@
 import { createServer } from 'node:http';
-import { readFile, writeFile, rename, mkdir, appendFile, chmod, rm, readdir, copyFile } from 'node:fs/promises';
+import { readFile, writeFile, rename, mkdir, appendFile, chmod, rm, readdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join, resolve, extname, relative, isAbsolute } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
@@ -16,75 +16,56 @@ const templateFile = join(DATA, 'department-templates.json');
 const reportFile = id => join(DATA, `report-${id}.json`);
 const profilePath = id => join(PROFILE_ROOT, id);
 const verifierFile = join(DATA, 'verifier-relationships.json');
-const templateHistoryRoot = join(DATA, 'template-history');
-const settingsFile = join(DATA, 'settings.json');
-const holidayFile = join(DATA, 'holidays.json');
 const auditFile = join(DATA, 'audit.jsonl');
 const personalTemplateRoot = join(DATA, 'personal-templates');
-const verificationRecordingFile = join(DATA, 'verification-recording.json');
-const verificationScanRecordingFile = join(DATA, 'verification-scan-recording.json');
 const personalHistoryRoot = join(DATA, 'personal-template-history');
 const personalFile = id => join(personalTemplateRoot, `${safeId(id)}.json`);
 const personalHistoryDir = id => join(personalHistoryRoot, safeId(id));
 const MAX_HISTORY = 20;
 const sensitiveKeys = /password|cookie|csrf|token|secret|authorization/i;
 const locks = new Set();
-let stagedRoster;
 const stagedPersonal = new Map();
 const operationProgress=new Map();
 function progress(id,stage,message,detail={}){const current=operationProgress.get(id)||{sequence:0,events:[]};const event={sequence:++current.sequence,at:new Date().toISOString(),stage,message,...sanitize(detail)};current.events.push(event);if(current.events.length>100)current.events.shift();current.active=!['complete','error'].includes(stage);current.latest=event;operationProgress.set(id,current);return event;}
 function progressState(id,since=0){const current=operationProgress.get(id)||{sequence:0,events:[],active:false,latest:null};return {active:current.active,sequence:current.sequence,latest:current.latest,events:current.events.filter(event=>event.sequence>since)};}
-const supervisorLookups=new Map();
-async function googleSupervisorLookup(rawNip){
-  const nip=employeeId(rawNip);if(!/^\d{18}$/.test(nip))bad('NIP atasan harus tepat 18 digit');
-  const spaced=`${nip.slice(0,8)} ${nip.slice(8,14)} ${nip.slice(14,15)} ${nip.slice(15)}`,query=`${nip} OR "${spaced}"`,sourceUrl=`https://www.google.com/search?client=firefox-b-d&hl=id&filter=0&pws=0&q=${encodeURIComponent(query)}`;
-  const context=await chromium.launchPersistentContext(join(PROFILE_ROOT,'google-search'),{channel:'msedge',headless:false,locale:'id-ID',viewport:null});
-  let blocks=[];
-  try{
-    const page=context.pages()[0]??await context.newPage();await page.goto(sourceUrl,{waitUntil:'domcontentloaded',timeout:60000});
-    await page.waitForSelector('a h3',{timeout:30000}).catch(()=>{});if(!await page.locator('a h3').count()){const body=await page.locator('body').innerText().catch(()=>'');throw new HttpError(502,/unusual traffic|bukan robot|not a robot|captcha/i.test(body)?'Google meminta verifikasi CAPTCHA. Selesaikan CAPTCHA pada jendela Edge sebelum 30 detik habis, atau klik Cari NIP lagi; sesi verifikasi disimpan.':'Google tidak menampilkan hasil pencarian. Buka tautan Google dan periksa koneksi atau pembatasan akses.');}
-    blocks=await page.locator('a:has(h3)').evaluateAll((links,nip)=>links.slice(0,5).map(link=>{const container=link.closest('[data-snhf],[data-sncf],div.MjjYud,div.g')||link.parentElement?.parentElement;const text=String(container?.innerText||'').replace(/\s+/g,' ').trim();return {title:String(link.querySelector('h3')?.textContent||'').trim(),url:link.href,snippet:text.replace(String(link.querySelector('h3')?.textContent||''),'').replace(nip,'').trim().slice(0,700)};}),nip);
-  }finally{await context.close();}
-  const classify=item=>{const text=`${item.title} ${item.snippet}`.replace(/\s+/g,' ').trim(),name=(text.match(/(?:Nama|Nama Pegawai)\s*[:\-]\s*([A-Z][A-Za-zÀ-ÿ.' ,]{3,80})/i)||text.match(/\b([A-Z][A-ZÀ-Ÿ.' ]{5,80}(?:,\s*[A-Z.]+)?)\b/))?.[1]?.trim()||'',position=(text.match(/(?:Jabatan|Posisi)\s*[:\-]\s*([^|;]{3,100})/i)||text.match(/\b(Sekretaris|Panitera(?: Muda)?|Hakim|Analis[^,;|]{0,70}|Kepala Sub Bagian[^,;|]{0,70}|Kasubbag[^,;|]{0,70})\b/i))?.[1]?.trim()||'',satker=(text.match(/(?:Satuan Kerja|Satker)\s*[:\-]\s*([^|;]{3,120})/i)||text.match(/\b((?:Pengadilan Negeri|Pengadilan Tinggi|Mahkamah Agung|Pengadilan Agama|Pengadilan Tata Usaha Negara)\s+[A-Za-zÀ-ÿ ]{2,60})\b/i))?.[1]?.trim()||'';return {...item,name:name||null,position:position||null,satker:satker||null};};
-  const results=blocks.filter(item=>item.title&&/^https?:/i.test(item.url)).slice(0,5).map(classify),token=randomBytes(16).toString('hex'),result={nip,query:`"${nip}"`,sourceUrl,results,found:results.length>0,token,checkedAt:new Date().toISOString()};
-  supervisorLookups.set(token,{nip,expires:Date.now()+10*60*1000});return result;
-}
-async function getSettings() {
-  if (existsSync(settingsFile)) {
-    try { return await readJson(settingsFile); } catch {}
-  }
-  return { satker: 'Pengadilan Negeri Natuna', customSatker: '' };
-}
-async function saveSettings(data) {
-  const current = await getSettings();
-  const next = { ...current, ...data };
-  await saveJson(settingsFile, next);
-  return next;
-}
 const loginFlows = new Map();
 const sessionCookies = new Map();
-let verificationRecording = null;
-let verificationScanRecording = null;
-let navigationRecording = null;
+const stagedVerification = new Map();
+const preservedVerificationContexts = new Map();
+const VERIFICATION_STAGE_TTL = 10 * 60_000;
+function closeVerificationStage(id){const stage=stagedVerification.get(id);if(!stage)return;clearTimeout(stage.timer);stagedVerification.delete(id);stage.context?.close().catch(()=>{});}
+function stageVerification(id,context,targets,filter){closeVerificationStage(id);const token=randomBytes(16).toString('hex'),stage={token,context,targets,filter,expires:Date.now()+VERIFICATION_STAGE_TTL};stage.timer=setTimeout(()=>closeVerificationStage(id),VERIFICATION_STAGE_TTL);stagedVerification.set(id,stage);return stage;}
 const LOGIN_FLOW_TTL = 10 * 60_000;
-const ROSTER_URLS = [
-  'https://pn-natuna.go.id/profil-pengadilan/profil-hakim',
-  'https://pn-natuna.go.id/profil-pengadilan/profil-kepaniteraan',
-  'https://pn-natuna.go.id/profil-pengadilan/profil-kesekretariatan'
+// Kalender libur SKB 3 Menteri 2026 (17 libur nasional + 8 cuti bersama).
+const SKB_2026_DAYS = [
+  {date:'2026-01-01',type:'national',label:'Tahun Baru 2026 Masehi'},
+  {date:'2026-01-16',type:'national',label:'Isra Mikraj Nabi Muhammad SAW'},
+  {date:'2026-02-16',type:'collective',label:'Cuti bersama Tahun Baru Imlek 2577 Kongzili'},
+  {date:'2026-02-17',type:'national',label:'Tahun Baru Imlek 2577 Kongzili'},
+  {date:'2026-03-18',type:'collective',label:'Cuti bersama Hari Suci Nyepi'},
+  {date:'2026-03-19',type:'national',label:'Hari Suci Nyepi, Tahun Baru Saka 1948'},
+  {date:'2026-03-20',type:'collective',label:'Cuti bersama Hari Raya Idul Fitri 1447 H'},
+  {date:'2026-03-21',type:'national',label:'Hari Raya Idul Fitri 1447 H'},
+  {date:'2026-03-22',type:'national',label:'Hari Raya Idul Fitri 1447 H'},
+  {date:'2026-03-23',type:'collective',label:'Cuti bersama Hari Raya Idul Fitri 1447 H'},
+  {date:'2026-03-24',type:'collective',label:'Cuti bersama Hari Raya Idul Fitri 1447 H'},
+  {date:'2026-04-03',type:'national',label:'Wafat Yesus Kristus'},
+  {date:'2026-04-05',type:'national',label:'Hari Kebangkitan Yesus Kristus (Paskah)'},
+  {date:'2026-05-01',type:'national',label:'Hari Buruh Internasional'},
+  {date:'2026-05-14',type:'national',label:'Kenaikan Yesus Kristus'},
+  {date:'2026-05-15',type:'collective',label:'Cuti bersama Kenaikan Yesus Kristus'},
+  {date:'2026-05-27',type:'national',label:'Hari Raya Idul Adha 1447 H'},
+  {date:'2026-05-28',type:'collective',label:'Cuti bersama Idul Adha 1447 H'},
+  {date:'2026-05-31',type:'national',label:'Hari Raya Waisak 2570 BE'},
+  {date:'2026-06-01',type:'national',label:'Hari Lahir Pancasila'},
+  {date:'2026-06-16',type:'national',label:'1 Muharam 1448 H / Tahun Baru Islam'},
+  {date:'2026-08-17',type:'national',label:'Hari Proklamasi Kemerdekaan'},
+  {date:'2026-08-25',type:'national',label:'Maulid Nabi Muhammad SAW'},
+  {date:'2026-12-24',type:'collective',label:'Cuti bersama Kelahiran Yesus Kristus'},
+  {date:'2026-12-25',type:'national',label:'Kelahiran Yesus Kristus'}
 ];
-async function getHolidayObject() {
-  if (existsSync(holidayFile)) {
-    try {
-      const data = await readJson(holidayFile);
-      if (Array.isArray(data)) return { "2026": data.map(clean).filter(Boolean) };
-      if (data && typeof data === 'object') return data;
-    } catch {}
-  }
-  return { "2026": ['2026-01-01','2026-01-16','2026-02-16','2026-02-17','2026-03-18','2026-03-19','2026-03-20','2026-03-21','2026-03-22','2026-03-23','2026-03-24','2026-04-03','2026-04-05','2026-05-01','2026-05-14','2026-05-15','2026-05-27','2026-05-28','2026-05-31','2026-06-01','2026-06-16','2026-08-17','2026-08-25','2026-12-24','2026-12-25'] };
-}
-async function getHolidays() {
-  const obj = await getHolidayObject();
-  return new Set(Object.values(obj).flat().map(clean).filter(Boolean));
+function getHolidays() {
+  return new Set(SKB_2026_DAYS.map(day=>day.date));
 }
 
 class HttpError extends Error { constructor(status, message) { super(message); this.status = status; } }
@@ -124,7 +105,7 @@ function validateRange(start, end) {
   return { first, last };
 }
 async function workdays(start, end) {
-  const { first, last } = validateRange(start, end), holidays = await getHolidays(), days = [];
+  const { first, last } = validateRange(start, end), holidays = getHolidays(), days = [];
   for (const date = new Date(first); date <= last; date.setDate(date.getDate() + 1)) {
     const iso = localIso(date), dow = date.getDay();
     if (dow && dow !== 6 && !holidays.has(iso)) days.push({ iso, dow });
@@ -182,6 +163,7 @@ async function closeLoginFlow(id, flow = loginFlows.get(id)) {
   if (!flow || flow.closing) return false;
   flow.closing = true; clearTimeout(flow.timer); loginFlows.delete(id); locks.delete(id);
   try { await flow.context.close(); } catch {}
+  if (id.startsWith('temp-')) await rm(profilePath(id), { recursive: true, force: true }).catch(() => {});
   return true;
 }
 async function openLogin(id) {
@@ -198,35 +180,25 @@ async function openLogin(id) {
     return { active: true, createdAt, expiresAt: flow.expiresAt, message: 'Edge dibuka. Selesaikan login SSO, lalu klik Selesai Login.' };
   } catch (error) { await closeLoginFlow(id); locks.delete(id); throw error; }
 }
-async function verifyLogin(id) {
-  const { context } = await launchEmployee(id);
-  try {
-    const page = await context.newPage();
-    await page.goto(LLK_BASE, { waitUntil: 'domcontentloaded' });
-    const auth = llkLocation(page.url()).authenticated;
-    if (!auth) return { loggedIn: false };
-    await discoverLlkRoutes(page);
-    return { loggedIn: true, stage: 'authenticated-root' };
-  } finally { await context.close(); }
-}
-async function generatePreview(employee, start, end, department) {
+async function generatePreview(employee, start, end, source = 'page', department, pageActivities = []) {
   if (!employee) throw new HttpError(404, 'Pegawai tidak ditemukan');
-  const personal = await readPersonal(employee.id), stored = await readJson(templateFile), templates = stored.departments || stored;
+  const stored = await readJson(templateFile), templates = stored.departments || stored;
   const selectedDepartment = clean(department) || employee.department;
   if (!templates[selectedDepartment]) bad('Template bagian tidak tersedia');
-  const activities = selectedDepartment === employee.department && personal?.activities?.length ? personal.activities : templates[selectedDepartment].activities;
-  if (!activities?.length) bad('Template jabatan/bagian belum tersedia');
+  const useGeneral = source === 'general';
+  const activities = useGeneral ? templates[selectedDepartment].activities : pageActivities;
+  if (!activities?.length) bad(useGeneral ? 'Template umum bagian ini belum memiliki kegiatan' : 'Halaman pertama LLK belum memiliki kegiatan. Pilih Template umum sebagai sumber alternatif.');
   let index = 0;
-  return (await workdays(start, end)).map(day => { const first = activities[index++ % activities.length], second = activities[index++ % activities.length], friday = day.dow === 5; const item=a=>({description:a.nama,type:a.kategori||'Pendukung',result:a.result||a.keterangan||'Selesai',...(a.output?{output:a.output}:{})}); return { date: day.iso, supervisor: employee.supervisor, items: [
-    {...item(first),start:first.start||'08:00',end:first.end||'12:00'},
+  return (await workdays(start, end)).map(day => { const first = activities[index++ % activities.length], second = activities[index++ % activities.length], friday = day.dow === 5; const item=a=>({description:a.nama||a.description,type:a.kategori||a.type||'Pendukung',result:'Selesai'}); return { date: day.iso, supervisor: employee.supervisor, activitySource:useGeneral?'template-general':'llk-page-1', items: [
+    {...item(first),start:'08:00',end:'12:00'},
     { start:'12:00', end:friday ? '13:30':'13:00', description:'Istirahat', type:'Pendukung', result:'Selesai' },
-    {...item(second),start:second.start||(friday?'13:30':'13:00'),end:second.end||(friday?'17:00':'16:30')}
+    {...item(second),start:friday?'13:30':'13:00',end:friday?'17:00':'16:30'}
   ] }; });
 }
 function minute(value) { if (!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(value)) bad('Jam kegiatan tidak valid'); const [h,m] = value.split(':').map(Number); return h * 60 + m; }
 async function validatePreview(preview) {
   if (!Array.isArray(preview) || !preview.length || preview.length > 31) bad('Preview wajib berisi kegiatan');
-  const seen = new Set(), holidays = await getHolidays();
+  const seen = new Set(), holidays = getHolidays();
   return preview.map((day, dayIndex) => {
     if (!day || typeof day !== 'object' || seen.has(day.date)) bad('Tanggal preview duplikat atau tidak valid'); seen.add(day.date);
     const date = parseDate(day.date), iso = localIso(date), dow = date.getDay();
@@ -322,7 +294,6 @@ async function scrapeEntries(context, existingPage) {
   }
 }
 const entryKey=e=>canonical({date:e.date,start:clean(e.start),end:clean(e.end),description:clean(e.description),type:clean(e.type).replace(/^primary$/i,'Utama').replace(/^support$/i,'Pendukung'),result:clean(e.result)});
-async function auditEntries(id){const {context}=await launchEmployee(id);try{const entries=await scrapeEntries(context),counts=Object.create(null);entries.forEach(entry=>counts[entry.date]=(counts[entry.date]||0)+1);return {total:entries.length,unique:Object.keys(counts).length,dates:[...new Set(entries.map(e=>e.date))].sort(),duplicates:Object.entries(counts).filter(([,count])=>count>1).map(([date,count])=>({date,count}))};}finally{await context.close();}}
 async function extractCsrfToken(page, context) {
   const selectors = ['input[name="_token"]', 'input[name="csrf_token"]', 'input[name="_csrf"]', 'meta[name="csrf-token"]'];
   for (const sel of selectors) {
@@ -343,24 +314,32 @@ async function submitPreview(id, rawPreview, policy) {
   const preview = await validatePreview(rawPreview); if (!['skip','abort'].includes(policy)) bad('duplicatePolicy harus skip atau abort');
   const { employee, context } = await launchEmployee(id), report={ at:new Date().toISOString(), employee:{id:employee.id,name:employee.name}, duplicatePolicy:policy, results:[] };
   try {
-    const existing=new Set((await scrapeEntries(context)).map(entryKey)), duplicates=preview.filter(day=>day.items.every(item=>existing.has(entryKey({...item,date:day.date})))).map(day=>day.date);
-    if (duplicates.length && policy==='abort') {
-      report.results=preview.map(day=>({date:day.date,state:duplicates.includes(day.date)?'skipped':'ready',status:duplicates.includes(day.date)?'duplicate':'ready',statusLabel:duplicates.includes(day.date)?'Sudah ada di LLK':'Belum dikirim',submitted:false,skipped:duplicates.includes(day.date),failed:false,verified:duplicates.includes(day.date),error:duplicates.includes(day.date)?'Tanggal sudah ada; dibatalkan oleh kebijakan abort':undefined}));
+    const existingEntries=await scrapeEntries(context),existing=new Set(existingEntries.map(entryKey)),existingDates=new Set(existingEntries.map(entry=>entry.date));
+    const duplicateDates=preview.filter(day=>existingDates.has(day.date)).map(day=>day.date);
+    if (duplicateDates.length && policy==='abort') {
+      report.results=preview.map(day=>({date:day.date,state:duplicateDates.includes(day.date)?'skipped':'ready',status:duplicateDates.includes(day.date)?'duplicate':'ready',statusLabel:duplicateDates.includes(day.date)?'Tanggal sudah ada di LLK':'Belum dikirim',submitted:false,skipped:duplicateDates.includes(day.date),failed:false,verified:duplicateDates.includes(day.date),error:duplicateDates.includes(day.date)?'Tanggal sudah memiliki LLK pada halaman pertama; pengiriman seluruh rentang dibatalkan':undefined}));
       await saveJson(reportFile(id),report);
-      throw new HttpError(409,`Tanggal sudah ada: ${duplicates.join(', ')}`);
+      throw new HttpError(409,`Tanggal sudah ada di LLK: ${duplicateDates.join(', ')}. Tidak ada tanggal yang dikirim.`);
     }
     const page=await context.newPage();
     for (const day of preview) {
-      if (day.items.every(item=>existing.has(entryKey({...item,date:day.date})))) {
-        report.results.push({date:day.date,state:'skipped',status:'duplicate',statusLabel:'Sudah ada di LLK',message:'Dilewati karena isian identik sudah tercatat',submitted:false,skipped:true,failed:false,verified:true,itemCount:day.items.length});
+      if (existingDates.has(day.date)) {
+        report.results.push({date:day.date,state:'skipped',status:'duplicate',statusLabel:'Sudah ada di LLK',message:'Dilewati karena tanggal sudah memiliki LLK di halaman pertama',submitted:false,skipped:true,failed:false,verified:true,itemCount:day.items.length});
         continue;
       }
       const result={date:day.date,state:'failed',status:'failed',statusLabel:'Gagal dikirim',submitted:false,skipped:false,failed:true,verified:false,itemCount:day.items.length,payload:{date:day.date,items:day.items}};
       try {
-        await page.goto(`${LLK_BASE}/profile`,{waitUntil:'domcontentloaded'});
+        await page.goto(`${LLK_BASE}/profile`,{waitUntil:'domcontentloaded',timeout:60000});
         const token = await extractCsrfToken(page, context);
+        await page.goto(`${LLK_BASE}/llk/create`,{waitUntil:'domcontentloaded',timeout:60000});
+        const selectedSupervisor=await resolveLlkSupervisor(context,employeeId(employee.supervisor.nip)||employee.supervisor.id);
+        const liveSupervisor={id:selectedSupervisor.id,nip:selectedSupervisor.nip,name:selectedSupervisor.name,fields:{nip:'recorded-api',name:'recorded-api'}};
+        if(!employeeId(liveSupervisor.nip)||!liveSupervisor.name)throw new Error('Lookup atasan tidak lengkap. Pengiriman dibatalkan.');
+        const employees=await getEmployees(),employeeIndex=employees.findIndex(item=>item.id===employee.id);
+        employee.supervisor={id:liveSupervisor.id,nip:liveSupervisor.nip,name:liveSupervisor.name};
+        if(employeeIndex>=0){employees.splice(employeeIndex,1,employee);await saveJson(employeeFile,employees);}
         const [year,month,date]=day.date.split('-');
-        const payload=new URLSearchParams({redirect:`${LLK_BASE}/llk`,_token:token,'author[name]':employee.name,'author[nip]':employee.nip,'author[jabatan_text]':employee.position,'supervisor[nip]':employee.supervisor.nip || employee.supervisor.id,'supervisor[name]':employee.supervisor.name,activity_date:`${date}-${month}-${year}`});
+        const payload=new URLSearchParams({redirect:`${LLK_BASE}/llk`,_token:token,'author[name]':employee.name,'author[nip]':employee.nip,'author[jabatan_text]':employee.position,'supervisor[nip]':liveSupervisor.id,'supervisor[name]':liveSupervisor.name,activity_date:`${date}-${month}-${year}`});
         for (const item of day.items) { payload.append('items[start_time][]',item.start); payload.append('items[end_time][]',item.end); payload.append('items[description][]',item.description); payload.append('items[type][]',item.type==='Utama'?'primary':'support'); payload.append('items[result][]',item.result); payload.append('items[note][]',''); payload.append('items[id][]',''); }
         const response=await context.request.post(`${LLK_BASE}/llk/save`,{headers:{'content-type':'application/x-www-form-urlencoded',referer:`${LLK_BASE}/llk/create`},data:payload.toString(),maxRedirects:0});
         result.httpStatus=response.status();
@@ -414,27 +393,7 @@ async function submitPreview(id, rawPreview, policy) {
     return report;
   } finally { await context.close(); }
 }
-function decodeHtml(text) { return clean(text.replace(/<[^>]*>/g,' ').replace(/&nbsp;/g,' ').replace(/&amp;/g,'&').replace(/&#039;/g,"'").replace(/&quot;/g,'"')); }
 function slug(text) { return clean(text).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,''); }
-function parseRoster(html, source) {
-  const articlePattern=/<article\b[^>]*class="[^"]*roster-(?:card|featured)[^"]*"[^>]*>([\s\S]*?)<\/article>/gi, people=[]; let match;
-  while ((match=articlePattern.exec(html))) { const block=match[1], name=decodeHtml(block.match(/<h3\b[^>]*class="[^"]*(?:roster-name|roster-featured-name)[^"]*"[^>]*>([\s\S]*?)<\/h3>/i)?.[1]||''); if (!name) continue; const nip=clean(decodeHtml(block.match(/<dt>\s*NIP\s*<\/dt>\s*<dd>([\s\S]*?)<\/dd>/i)?.[1]||'')); const roles=[...block.matchAll(/<(?:span|div)\b[^>]*class="[^"]*roster-(?:role|eyebrow)[^"]*"[^>]*>([\s\S]*?)<\/(?:span|div)>/gi)].map(x=>decodeHtml(x[1])).filter(x=>x&&x!=='PPPK'); const position=roles.join('; ') || (source.includes('hakim')?'Hakim':'Pegawai'); const department=source.includes('hakim')?'hakim':source.includes('kepaniteraan')?'panitera':position.match(/Kepegawaian/i)?'kepegawaian':position.match(/Umum|Keuangan/i)?'umum_keuangan':position.match(/Perencanaan|TI|Teknologi/i)?'ptip':'sekretaris'; people.push({id:nip||`adhoc-${slug(name)}`,nip,name,position,department,supervisor:{id:'',nip:'',name:''}}); }
-  return people;
-}
-async function rosterDiff() {
-  const pages=await Promise.all(ROSTER_URLS.map(async url=>{ const response=await fetch(url,{signal:AbortSignal.timeout(20000),headers:{accept:'text/html'}}); if (!response.ok) throw new Error(`Situs resmi gagal: HTTP ${response.status}`); return parseRoster(await response.text(),url); }));
-  const official=[...new Map(pages.flat().map(person=>[person.id,person])).values()], local=await getEmployees(); if (official.length<20) throw new Error('Data roster resmi tidak lengkap');
-  const localMap=new Map(local.map(e=>[e.id,e])), officialMap=new Map(official.map(e=>[e.id,e]));
-  const added=official.filter(e=>!localMap.has(e.id)), removed=local.filter(e=>!officialMap.has(e.id)), changed=official.filter(e=>{const old=localMap.get(e.id); return old&&(old.name!==e.name||old.position!==e.position);}).map(e=>({before:localMap.get(e.id),after:e}));
-  stagedRoster={official,createdAt:new Date().toISOString()}; return {createdAt:stagedRoster.createdAt,added,removed,changed,unchanged:official.length-added.length-changed.length};
-}
-async function applyRoster() {
-  if (!stagedRoster) bad('Belum ada diff roster yang aktif'); const local=await getEmployees(), localMap=new Map(local.map(e=>[e.id,e]));
-  const employees=stagedRoster.official.map(remote=>{const old=localMap.get(remote.id); return old?{...old,nip:remote.nip,name:remote.name,position:remote.position,department:old.department,supervisor:old.supervisor}:{...remote};});
-  await saveJson(employeeFile,employees); const appliedAt=new Date().toISOString(); stagedRoster=undefined; return {appliedAt,count:employees.length};
-}
-function validateEmployeeArray(value) { if (!Array.isArray(value)||value.length>500) bad('employees tidak valid'); const ids=new Set(); return value.map(e=>{ if (!e||typeof e!=='object') bad('Pegawai tidak valid'); const id=clean(e.id),nip=clean(e.nip),name=clean(e.name),position=clean(e.position),department=clean(e.department),supervisor=e.supervisor; if(!id||ids.has(id)||!name||!position||!department||!supervisor||typeof supervisor!=='object') bad('Data pegawai restore tidak valid'); ids.add(id); return {id,nip,name,position,department,supervisor:{id:clean(supervisor.id),nip:clean(supervisor.nip),name:clean(supervisor.name)}}; }); }
-function validateTemplates(value) { if (!value||typeof value!=='object'||Array.isArray(value)) bad('templates tidak valid'); for(const group of Object.values(value)){if(!group||typeof group.label!=='string'||!Array.isArray(group.activities)||group.activities.some(a=>!a||typeof a.nama!=='string'||typeof a.kategori!=='string')) bad('Template restore tidak valid');} return value; }
 async function importVerifier(id, existingContext, existingPage){
   const owned=!existingContext,{context}=existingContext?{context:existingContext}:await launchEmployee(id);
   try {
@@ -454,9 +413,8 @@ async function importVerifier(id, existingContext, existingPage){
   } finally {if(owned)await context.close();}
 }
 async function templateSnapshot(){const templates=await readJson(templateFile);return templates.version&&templates.departments?templates:{version:1,updatedAt:null,departments:templates};}
-async function applyTemplates(input,actor){const current=await templateSnapshot(),departments=validateTemplates(input.departments||input);await mkdir(templateHistoryRoot,{recursive:true});await saveJson(join(templateHistoryRoot,`${String(current.version).padStart(6,'0')}-${Date.now()}.json`),current);await rotateFiles(templateHistoryRoot,'');const next={version:current.version+1,updatedAt:new Date().toISOString(),departments};await saveJson(templateFile,next);await audit('templates.apply',actor,{version:next.version},{result:'applied'});return next;}
 async function readPersonal(id){return existsSync(personalFile(id))?validatePersonal(await readJson(personalFile(id)),id):null;}
-function validatePersonal(value,id){if(!value||typeof value!=='object'||value.employeeId!==id||!Array.isArray(value.activities)||value.activities.length>1000)bad('Template pribadi tidak valid');const activities=value.activities.map(a=>{const nama=clean(a?.nama),kategori=clean(a?.kategori)||'Pendukung',result=clean(a?.result||a?.output);if(!nama||/^istirahat$/i.test(nama)||!['Utama','Pendukung'].includes(kategori))bad('Kegiatan template pribadi tidak valid');return {nama,kategori,...(result?{result}:{})};});return {...sanitize(value),employeeId:id,activities};}
+function validatePersonal(value,id){if(!value||typeof value!=='object'||value.employeeId!==id||!Array.isArray(value.activities)||value.activities.length>1000)bad('Daftar kegiatan profil tidak valid');const activities=value.activities.map(a=>{const nama=clean(a?.nama),kategori=clean(a?.kategori)||'Pendukung';if(!nama||/^istirahat$/i.test(nama)||!['Utama','Pendukung'].includes(kategori))bad('Kegiatan profil tidak valid');return {nama,kategori,result:'Selesai',...(a.start?{start:clean(a.start)}:{}),...(a.end?{end:clean(a.end)}:{}),...(a.count?{count:a.count}:{}),...(a.lastSeen?{lastSeen:a.lastSeen}:{})};});return {...sanitize(value),employeeId:id,activities};}
 async function personalResponse(employee){const personal=await readPersonal(employee.id),stored=await readJson(templateFile),departments=stored.departments||stored,fallback=departments[employee.department];return {source:personal?.activities?.length?'personal':'department',personal,activities:personal?.activities?.length?personal.activities:(fallback?.activities||[]),fallbackLabel:fallback?.label||employee.department};}
 async function importPersonal(id, existingContext, existingPage){
   const employee=await findEmployee(id),owned=!existingContext,{context}=existingContext?{context:existingContext}:await launchEmployee(id);
@@ -481,45 +439,28 @@ async function importPersonal(id, existingContext, existingPage){
     return {available:true,current,candidate,activities,scannedEntries:allEntries.length,pagesScanned:entries.pagesScanned||1,sourceUrl:entries.sourceUrl||null,stageToken,digest,diff:{added:activities.length,modified:0,removed:current?.activities?.length||0}};
   } finally {if(owned)await context.close();}
 }
+async function resolveLlkSupervisor(context,nip){
+  const url=`${LLK_BASE}/llk/findPegawai?term=${encodeURIComponent(nip)}&_type=query&q=${encodeURIComponent(nip)}`;
+  const response=await context.request.get(url,{headers:{accept:'application/json',referer:`${LLK_BASE}/llk/create`},timeout:30000});
+  if(!response.ok())throw new Error(`Lookup NIP atasan gagal: HTTP ${response.status()}`);
+  const body=await response.json(),rows=Array.isArray(body)?body:body.results||body.data||[];
+  const candidate=rows.find(row=>employeeId(row.id||row.nip||row.value)===nip)||rows[0];
+  const rawName=candidate?.name||candidate?.nama||candidate?.pegawai||candidate?.label||candidate?.text||'';
+  const name=clean(rawName).replace(nip,'').replace(/^[-–—/\s]+|[-–—/\s]+$/g,'');
+  const id=clean(candidate?.id||candidate?.value||candidate?.pegawai_id||candidate?.nip||nip);
+  if(!candidate||!name||employeeId(name)===nip||!id)throw new Error(`Lookup NIP atasan tidak menemukan nama untuk ${nip}`);
+  return {id,nip,name,url};
+}
 async function enrichEmployeeFromSso(employee, page) {
-  const routes = await discoverLlkRoutes(page);
-  const createUrl = discoveredRoute(routes, [/tambah.*(?:llk|kegiatan)/, /llk.*(?:buat|create)/, /kegiatan.*(?:buat|create)/]);
   const originalUrl = page.url();
-  if (createUrl) await navigateFeature(page, createUrl).catch(() => {});
-  else await page.goto(`${LLK_BASE}/llk/create`, { waitUntil: 'domcontentloaded' }).catch(() => {});
-  const fields = await page.evaluate(() => {
-    const cleanText = value => String(value || '').replace(/\s+/g, ' ').trim();
-    const value = name => cleanText(document.querySelector(`[name="${name}"]`)?.value);
-    const supervisor = document.querySelector('[name="supervisor[nip]"]');
-    const option = supervisor?.selectedOptions?.[0];
-    const profile = cleanText(document.querySelector('.dropdown-toggle, [data-profile-name], .profile-name')?.textContent);
-    const profileNip = profile.match(/\b\d{8,20}\b/)?.[0] || '';
-    return {
-      name: value('author[name]') || cleanText(profile.replace(profileNip, '').replace(/NIP\s*:?/i, '')),
-      nip: value('author[nip]') || profileNip,
-      position: value('author[jabatan_text]'),
-      supervisorId: cleanText(supervisor?.value),
-      supervisorName: value('supervisor[name]') || cleanText(option?.textContent)
-    };
-  });
-  if (originalUrl && originalUrl !== page.url()) await page.goto(originalUrl, { waitUntil: 'domcontentloaded' }).catch(() => {});
-  const requestedSupervisor = employeeId(employee.supervisor.nip) || clean(employee.supervisor.id);
-  const updated = {
-    ...employee,
-    name: clean(fields.name) || employee.name,
-    nip: employeeId(fields.nip) || employee.nip,
-    position: clean(fields.position) || employee.position,
-    supervisor: {
-      id: clean(fields.supervisorId) || requestedSupervisor || employee.supervisor.id,
-      nip: requestedSupervisor || employeeId(fields.supervisorId) || employee.supervisor.nip,
-      name: clean(fields.supervisorName) || employee.supervisor.name
-    }
-  };
-  const employees = await getEmployees();
-  const index = employees.findIndex(item => item.id === employee.id || item.nip === updated.nip);
-  if (index >= 0) employees.splice(index, 1, updated); else employees.push(updated);
-  await saveJson(employeeFile, employees);
-  return updated;
+  await page.goto(`${LLK_BASE}/profile`,{waitUntil:'domcontentloaded',timeout:60000});
+  const profile=await page.evaluate(()=>{const clean=value=>String(value||'').replace(/\s+/g,' ').trim(),read=label=>{const node=[...document.querySelectorAll('th,dt,label,div')].find(item=>clean(item.textContent)===label);const container=node?.closest('tr,dl,.row,.form-group')||node?.parentElement;const values=[...container?.querySelectorAll('td,dd,[class*="col-"]')||[]].map(item=>clean(item.textContent)).filter(value=>value&&value!==label);return values.at(-1)||'';};return {name:read('Nama Lengkap'),nip:read('NIP'),position:read('Jabatan'),satker:read('Satuan Kerja').replace(/^\(\d+\)\s*/,'')};});
+  await page.goto(`${LLK_BASE}/llk/create`,{waitUntil:'domcontentloaded',timeout:60000});
+  const requestedNip=employeeId(employee.supervisor.nip)||clean(employee.supervisor.id),lookup={attempted:false,nip:requestedNip,name:'',control:'recorded-api',select2:true};
+  if(requestedNip){const selected=await resolveLlkSupervisor(page.context(),requestedNip);lookup.attempted=true;lookup.name=selected.name;lookup.resultText=selected.name;lookup.url=selected.url;}
+  if(originalUrl&&originalUrl!==page.url())await page.goto(originalUrl,{waitUntil:'domcontentloaded'}).catch(()=>{});
+  const name=clean(profile.name),nip=employeeId(profile.nip),position=clean(profile.position),satker=clean(profile.satker),supervisorName=clean(lookup.name),updated={...employee,name:name.length>3?name:employee.name,nip:nip||employee.nip,position:position.length>3?position:employee.position,satker:satker.length>3?satker:employee.satker,supervisor:{id:requestedNip||employee.supervisor.id,nip:requestedNip||employee.supervisor.nip,name:supervisorName||employee.supervisor.name,verified:Boolean(requestedNip&&supervisorName),source:supervisorName?'llk-select2':'pending-lookup'},accountIdentity:{name,nip,position,satker},supervisorLookup:lookup};
+  const employees=await getEmployees(),index=employees.findIndex(item=>item.id===employee.id||item.nip===updated.nip);if(index>=0)employees.splice(index,1,updated);else employees.push(updated);await saveJson(employeeFile,employees);return updated;
 }
 
 async function launchExternalBootstrap(satker, supervisorNip, department = 'umum_keuangan') {
@@ -530,22 +471,6 @@ async function launchExternalBootstrap(satker, supervisorNip, department = 'umum
   await ensurePasswordManagerPrefs(dir);
   const context=await chromium.launchPersistentContext(dir,{channel:'msedge',headless:false,viewport:null});
   return {employee,context,tempId};
-}
-
-async function moveBrowserProfile(source, destination) {
-  if (source === destination || !existsSync(source)) return;
-  if (existsSync(destination)) await rm(destination, { recursive: true, force: true });
-  let lastError;
-  for (let attempt = 0; attempt < 10; attempt++) {
-    try {
-      await rename(source, destination);
-      return;
-    } catch (error) {
-      lastError = error;
-      await new Promise(resolveDelay => setTimeout(resolveDelay, 250));
-    }
-  }
-  throw new Error(`Profil browser SSO gagal disimpan: ${lastError?.message || 'rename gagal'}`);
 }
 
 async function completeExternalBootstrap(tempId,tempEmployee,context) {
@@ -560,7 +485,7 @@ async function completeExternalBootstrap(tempId,tempEmployee,context) {
   const enriched=await enrichEmployeeFromSso(placeholder,page);
   const history=await importPersonal(actualNip,context,page);
   if(history?.candidate)await saveJson(personalFile(actualNip),history.candidate);
-  await storeSessionCookies(actualNip,await context.cookies([LLK_BASE]));
+  await storeSessionCookies(actualNip,await context.cookies());
   const flow=loginFlows.get(tempId);
   if(flow){flow.employee=enriched;flow.actualNip=actualNip;flow.fetchedAt=new Date().toISOString();}
   return {employee:enriched,verifier,history,sessionActive:true,tempId};
@@ -575,43 +500,12 @@ async function completeLogin(id){
   if(expectedNip){if(actualNip!==expectedNip)throw new HttpError(401,'Identitas akun SSO tidak cocok dengan NIP pegawai terpilih');}
   else {if(normalizedIdentity(verifier.verifier.name)!==normalizedIdentity(flow.employee.name))throw new HttpError(401,'Identitas akun SSO tidak cocok dengan nama pegawai terpilih');warnings.push('Pegawai Ad-Hoc tanpa NIP dicocokkan berdasarkan nama lengkap persis. Pastikan identitas benar sebelum melanjutkan.');}
   const history=await importPersonal(id,flow.context,page);if(history.warning)warnings.push(history.warning);
-  await storeSessionCookies(id,await flow.context.cookies([LLK_BASE]));
+  await storeSessionCookies(id,await flow.context.cookies());
   await closeLoginFlow(id,flow);
   return {active:false,authenticated:true,stage:'complete',identity:verifier.verifier,employee,warning:warnings.join(' ')||null,warnings,verifier,history,autoApplied:false};
 }
-async function startVerificationRecording(input) {
-  const id=safeId(input.employeeId);
-  if(verificationRecording)throw new HttpError(409,'Perekaman verifikasi sudah aktif');
-  const {employee,context}=await launchEmployee(id,false);
-  const page=context.pages()[0]??await context.newPage();
-  const requests=[];
-  const capture=request=>{
-    if(request.method()==='GET'||!request.url().startsWith(LLK_BASE))return;
-    let payload={};
-    try{payload=Object.fromEntries(new URLSearchParams(request.postData()||''));}catch{}
-    requests.push({method:request.method(),url:request.url(),payload:sanitize(payload)});
-  };
-  context.on('request',capture);
-  await page.goto(`${LLK_BASE}/verifikasi`,{waitUntil:'domcontentloaded'});
-  verificationRecording={employee,context,page,requests,capture,customMessage:clean(input.customMessage),startedAt:new Date().toISOString()};
-  return {active:true,startedAt:verificationRecording.startedAt,url:page.url()};
-}
-
-async function finishVerificationRecording() {
-  if(!verificationRecording)throw new HttpError(409,'Tidak ada perekaman aktif');
-  const {employee,context,page,requests,capture,customMessage,startedAt}=verificationRecording;
-  const forms=await page.evaluate(()=>[...document.forms].map(form=>({action:form.action,method:(form.method||'get').toUpperCase(),fields:[...form.elements].map(field=>({name:field.name,type:field.type,tag:field.tagName.toLowerCase(),value:/password|token|csrf/i.test(field.name)?'':String(field.value||'').slice(0,200)})).filter(field=>field.name)})));
-  const result={employeeId:employee.id,startedAt,finishedAt:new Date().toISOString(),url:page.url(),customMessage,title:clean(await page.title().catch(()=>'')),requests,forms};
-  context.off('request',capture);
-  await storeSessionCookies(employee.id,await context.cookies([LLK_BASE]));
-  await saveJson(verificationRecordingFile,sanitize(result));
-  await context.close();
-  verificationRecording=null;
-  await audit('verification.record',employee.id,{customMessage,url:result.url,requestCount:requests.length,formCount:forms.length},{result:'recorded'});
-  return {url:result.url,requestCount:requests.length,formCount:forms.length};
-}
 async function verificationTargets(id, existingContext, extractIds = true) {
-  const owned=!existingContext,{context}=existingContext?{context:existingContext}:await launchEmployee(id);
+  const preserved=preservedVerificationContexts.get(id),owned=!existingContext&&!preserved,{context}=existingContext?{context:existingContext}:preserved?{context:preserved.context}:await launchEmployee(id,false);
   progress(id,'launch','Membuka browser headless dan memuat sesi LLK…');
   try {
     const page=existingContext?(authenticatedLlkPage(context)??context.pages()[0]??await context.newPage()):await context.newPage();
@@ -619,13 +513,15 @@ async function verificationTargets(id, existingContext, extractIds = true) {
       await page.goto(LLK_BASE,{waitUntil:'domcontentloaded'});
       if(!llkLocation(page.url()).authenticated)throw new HttpError(401,'Sesi LLK kedaluwarsa; login ulang diperlukan');
     }
-    progress(id,'home','Beranda LLK aktif. Mencari menu Verifikasi LLK…',{url:page.url()});
     const menu=page.locator('a[href="/verifikasi"], a[href="https://llk.mahkamahagung.go.id/verifikasi"]').first();
-    if(await menu.count()){
-      await menu.click();
-      await page.waitForURL(url=>url.origin===LLK_BASE&&/^\/verifikasi(?:\/|$)/i.test(url.pathname),{timeout:15000}).catch(()=>{});
-      await page.waitForLoadState('domcontentloaded').catch(()=>{});
+    const pendingCount=await menu.evaluate(node=>{const text=String(node.textContent||'').replace(/\s+/g,' ').trim(),badge=node.querySelector('.badge,.label,[class*="badge"],[class*="label"]'),raw=String(badge?.textContent||text).match(/\b(\d+)\b/)?.[1];return Number(raw||0);}).catch(()=>0);
+    if(!pendingCount){
+      progress(id,'complete','Menu Verifikasi LLK tidak memiliki badge merah. Tidak ada LLK yang perlu diverifikasi.',{url:page.url(),pendingCount:0});
+      return Object.assign([],{pagesScanned:0,rowsFound:0,validCount:0,invalidCount:0,invalidTargets:[]});
     }
+    progress(id,'home',`Badge Verifikasi LLK menunjukkan ${pendingCount} target. Membuka daftar verifikasi…`,{url:page.url(),pendingCount});
+    await Promise.all([page.waitForURL(url=>url.origin===LLK_BASE&&/^\/verifikasi(?:\/|$)/i.test(url.pathname),{timeout:15000,waitUntil:'domcontentloaded'}),menu.click()]);
+    await page.waitForLoadState('domcontentloaded',{timeout:15000});
     progress(id,'verification','Halaman Verifikasi LLK terbuka. Menerapkan filter Belum Terverifikasi…',{url:page.url()});
     if(!/^\/verifikasi(?:\/|$)/i.test(new URL(page.url()).pathname))throw new HttpError(401,`Menu Verifikasi LLK gagal dibuka; URL ${page.url()}`);
     const statusControl=page.locator('input[name="status"][value="1"], select[name="status"]').first();
@@ -637,12 +533,21 @@ async function verificationTargets(id, existingContext, extractIds = true) {
       if(await byControl.evaluate(node=>node.tagName==='SELECT'))await byControl.selectOption('nip');
       else await byControl.check({force:true});
     }
-    progress(id,'filter','Filter status=1 dan pencarian berdasarkan NIP diterapkan. Menunggu hasil…',{url:page.url()});
     const searchButton=page.locator('button,input[type="submit"]').filter({hasText:/Cari|Search/i}).first();
     if(!await searchButton.count())throw new Error('Tombol Cari verifikasi tidak ditemukan');
+    progress(id,'filter-submit','Tombol Cari diklik. Menunggu navigasi hasil filter sampai DOM siap…',{url:page.url()});
     await searchButton.click({noWaitAfter:true});
-    await page.waitForURL(url=>url.origin===LLK_BASE&&/^\/verifikasi(?:\/|$)/i.test(url.pathname)&&url.searchParams.get('status')==='1',{timeout:15000}).catch(()=>{});
-    await page.waitForLoadState('domcontentloaded',{timeout:15000}).catch(()=>{});
+    await page.waitForLoadState('domcontentloaded',{timeout:60000}).catch(error=>{throw new Error(`Halaman hasil filter belum siap setelah 60 detik: ${error.message}`);});
+    progress(id,'filter-table','DOM hasil filter siap. Menunggu tabel hasil hingga 60 detik…',{url:page.url(),readyState:await page.evaluate(()=>document.readyState)});
+    await page.locator('table').first().waitFor({state:'visible',timeout:60000});
+    const appliedFilter=await page.evaluate(()=>{
+      const status=document.querySelector('input[name="status"]:checked,select[name="status"]');
+      const by=document.querySelector('input[name="by"]:checked,select[name="by"]');
+      return {status:status?.value||'',by:by?.value||'',url:location.href};
+    });
+    const appliedUrl=new URL(appliedFilter.url);
+    if(appliedFilter.status!=='1'||appliedFilter.by!=='nip'||appliedUrl.searchParams.get('status')!=='1'||appliedUrl.searchParams.get('by')!=='nip')throw new Error(`Filter belum diterapkan: status=${appliedFilter.status||'kosong'}, berdasarkan=${appliedFilter.by||'kosong'}, URL=${appliedFilter.url}`);
+    progress(id,'filter','Filter Belum Terverifikasi dan pencarian berdasarkan NIP telah terbukti aktif.',appliedFilter);
     await page.locator('table').first().waitFor({state:'visible',timeout:15000}).catch(()=>{});
     await page.waitForTimeout(750);
     if(!llkLocation(page.url()).authenticated)throw new HttpError(401,'Sesi LLK kedaluwarsa; login ulang diperlukan');
@@ -706,193 +611,75 @@ async function verificationTargets(id, existingContext, extractIds = true) {
       return preview;
     }
     if(!validRows.length)return Object.assign([],{pagesScanned:visited.size,rowsFound:uniqueRows.length,validCount:0,invalidCount:invalidRows.length,invalidTargets:invalidRows});
-    const extracted=await Promise.all(validRows.map(async (row,index)=>{
+    const extracted=[];
+    for(const [index,row] of validRows.entries()){
       const started=Date.now();progress(id,'target-fetch',`Membaca ID target ${index+1}/${validRows.length}…`,{target:index+1,totalTargets:validRows.length,date:row.date});
-      let editPage;
-      try{
-        editPage=await context.newPage();
-        const response=await editPage.goto(row.editUrl,{waitUntil:'domcontentloaded',timeout:120000});
-        if(!response?.ok())return {failure:{...row,valid:false,issues:[`Halaman edit gagal: HTTP ${response?.status()||'tanpa respons'} setelah ${Date.now()-started} ms`]}};
-        const input=editPage.locator('input[name="hllk"]').first(),hllk=await input.inputValue({timeout:10000}).catch(()=>''),title=clean(await editPage.title().catch(()=>''));
-        if(/^\d+$/.test(hllk))return {target:{hllk,date:row.date,summary:row.summary,editUrl:row.editUrl,activities:row.activities,valid:true,issues:[]}};
-        const formNames=await editPage.locator('input[name],select[name],textarea[name]').evaluateAll(nodes=>nodes.map(node=>node.name)).catch(()=>[]);
-        return {failure:{...row,valid:false,issues:[`ID hllk tidak ditemukan; halaman "${title||'tanpa judul'}", URL akhir ${editPage.url()}, field: ${[...new Set(formNames)].slice(0,12).join(', ')||'tidak ada'} (${Date.now()-started} ms)`]}};
-      }catch(error){return {failure:{...row,valid:false,issues:[`${/timeout/i.test(error.message)?'Timeout 120 detik':'Fetch halaman edit gagal'}: ${error.message}`]}};}
-      finally{if(editPage)await editPage.close().catch(()=>{});}
-    }));
+      let hllk='',response,title='',lastError;
+      for(let attempt=1;attempt<=2&&!hllk;attempt++){
+        try{
+          response=await page.goto(row.editUrl,{waitUntil:'domcontentloaded',referer:verificationListUrl(),timeout:60000});
+          hllk=await page.locator('input[name="hllk"]').first().inputValue({timeout:5000}).catch(()=>''),title=clean(await page.title().catch(()=>''));
+          if(!/^[0-9]+$/.test(hllk))hllk='';
+        }catch(error){lastError=error;if(attempt<2)await page.waitForTimeout(1000);}
+      }
+      if(hllk)extracted.push({target:{hllk,date:row.date,summary:row.summary,editUrl:row.editUrl,activities:row.activities,valid:true,issues:[]}});
+      else{const formNames=await page.locator('input[name],select[name],textarea[name]').evaluateAll(nodes=>nodes.map(node=>node.name)).catch(()=>[]),errorDetail=lastError?`${/timeout/i.test(lastError.message)?'Timeout setelah 2 percobaan':'Fetch halaman edit gagal'}: ${lastError.message}`:`ID hllk tidak ditemukan; HTTP ${response?.status()||'tanpa respons'}, halaman "${title||'tanpa judul'}", URL akhir ${page.url()}, field: ${[...new Set(formNames)].slice(0,12).join(', ')||'tidak ada'}`;extracted.push({failure:{...row,valid:false,issues:[`${errorDetail} (${Date.now()-started} ms)`]}});}
+    }
     const targets=extracted.map(item=>item.target).filter(Boolean),idFailures=extracted.map(item=>item.failure).filter(Boolean);
     const uniqueTargets=[...new Map(targets.map(item=>[item.hllk,item])).values()];
     uniqueTargets.pagesScanned=visited.size;uniqueTargets.rowsFound=uniqueRows.length;uniqueTargets.validCount=uniqueTargets.length;uniqueTargets.invalidCount=invalidRows.length+idFailures.length;uniqueTargets.invalidTargets=[...invalidRows,...idFailures];
     progress(id,'complete',`Pemindaian selesai: ${uniqueTargets.length} target siap, ${uniqueTargets.invalidCount} ditahan.`,{validCount:uniqueTargets.length,invalidCount:uniqueTargets.invalidCount,pagesScanned:visited.size});
     return uniqueTargets;
-  } catch(error){progress(id,'error',`Pemindaian gagal: ${error.message}`);throw error;} finally {if(owned)await context.close();}
-}
-async function dryRunLlkToVerification(id){
-  const {context}=await launchEmployee(id);
-  try{
-    const page=context.pages()[0]??await context.newPage();
-    const llkEntries=await scrapeEntries(context,page);
-    if(llkEntries.available===false)throw new HttpError(400,llkEntries.warning||'Halaman LLK gagal dibaca');
-    const targets=await verificationTargets(id,context,false);
-    return {safe:true,verified:false,llk:{url:llkEntries.sourceUrl,pagesScanned:1,entries:llkEntries.length},verification:{filter:{status:'1',by:'nip'},pagesScanned:targets.pagesScanned||1,rowsFound:targets.rowsFound??targets.length,total:targets.length,validCount:targets.validCount??targets.filter(item=>item.valid).length,invalidCount:targets.invalidCount??targets.filter(item=>!item.valid).length,targets}};
-  }finally{await context.close();}
-}
-async function startVerificationScanRecording(input){
-  const id=safeId(input.employeeId);
-  if(verificationScanRecording)throw new HttpError(409,'Perekaman pemindaian sudah aktif');
-  const {employee,context}=await launchEmployee(id,false),page=context.pages()[0]??await context.newPage(),requests=[];
-  const capture=request=>{if(request.url().startsWith(LLK_BASE)&&/verifikasi/i.test(request.url()))requests.push({method:request.method(),url:request.url(),postData:sanitize(Object.fromEntries(new URLSearchParams(request.postData()||'')))});};
-  context.on('request',capture);
-  await page.goto(`${LLK_BASE}/verifikasi`,{waitUntil:'domcontentloaded'});
-  verificationScanRecording={employee,context,page,requests,capture,startedAt:new Date().toISOString()};
-  return {active:true,url:page.url()};
-}
-
-async function finishVerificationScanRecording(){
-  if(!verificationScanRecording)throw new HttpError(409,'Tidak ada perekaman pemindaian aktif');
-  const {employee,context,page,requests,capture,startedAt}=verificationScanRecording;
-  const dom=await page.evaluate(()=>{
-    const text=node=>String(node?.textContent||'').replace(/\s+/g,' ').trim();
-    const attrs=node=>Object.fromEntries([...node.attributes].map(attr=>[attr.name,attr.value]));
-    return {url:location.href,radios:[...document.querySelectorAll('input[type="radio"]')].map(node=>({attrs:attrs(node),checked:node.checked,label:text(node.closest('label')||node.parentElement)})),buttons:[...document.querySelectorAll('a,button,input[type="submit"]')].map(node=>({text:text(node),attrs:attrs(node)})),rows:[...document.querySelectorAll('table tbody > tr')].map(row=>({text:text(row).slice(0,500),html:row.outerHTML.slice(0,5000)})),forms:[...document.forms].map(form=>({attrs:attrs(form),html:form.outerHTML.slice(0,10000)}))};
-  });
-  const result={employeeId:employee.id,startedAt,finishedAt:new Date().toISOString(),requests,dom};
-  context.off('request',capture);await storeSessionCookies(employee.id,await context.cookies([LLK_BASE]));await saveJson(verificationScanRecordingFile,sanitize(result));await context.close();verificationScanRecording=null;
-  return {url:dom.url,rows:dom.rows.length,requests:requests.length};
-}
-
-
-async function startNavigationRecording(input) {
-  const id=safeId(input.employeeId),mode=clean(input.mode);
-  if(!['llk','verifikasi'].includes(mode))bad('Mode rekaman tidak valid');
-  if(navigationRecording)throw new HttpError(409,'Perekaman navigasi sudah aktif');
-  const {employee,context}=await launchEmployee(id,false),page=context.pages()[0]??await context.newPage(),requests=[];
-  const capture=request=>{if(request.url().startsWith(LLK_BASE))requests.push({method:request.method(),url:request.url()});};
-  context.on('request',capture);
-  await context.addInitScript(() => {
-    window.__llkAgentClicks=[];
-    document.addEventListener('click',event=>{
-      const node=event.target.closest('a,button,input[type="submit"]');
-      if(!node)return;
-      window.__llkAgentClicks.push({at:new Date().toISOString(),tag:node.tagName.toLowerCase(),text:String(node.textContent||node.value||'').replace(/\s+/g,' ').trim(),href:node.href||'',id:node.id||'',name:node.getAttribute('name')||'',className:String(node.className||'')});
-    },true);
-  });
-  const current=llkLocation(page.url());
-  if(!current.authenticated)await page.goto(LLK_BASE,{waitUntil:'domcontentloaded'});
-  navigationRecording={employee,context,page,mode,requests,capture,startedAt:new Date().toISOString()};
-  return {active:true,mode,url:page.url(),message:`Di Edge, klik menu ${mode==='llk'?'LLK':'Verifikasi LLK'} lalu tampilkan daftar yang ingin dibaca.`};
-}
-
-async function finishNavigationRecording() {
-  if(!navigationRecording)throw new HttpError(409,'Tidak ada perekaman navigasi aktif');
-  const {employee,context,page,mode,requests,capture,startedAt}=navigationRecording;
-  let imported=null;
-  if(mode==='llk'){
-    imported=await importPersonal(employee.id,context,page);
-    if(imported?.candidate)await saveJson(personalFile(employee.id),imported.candidate);
-  }
-  const clicks=await page.evaluate(()=>window.__llkAgentClicks||[]).catch(()=>[]);
-  const dom=await page.evaluate(()=>({url:location.href,title:document.title,links:[...document.querySelectorAll('a[href]')].map(a=>({text:String(a.textContent||'').replace(/\s+/g,' ').trim(),href:a.href,id:a.id||'',className:String(a.className||'')})),tables:[...document.querySelectorAll('table')].map(table=>table.outerHTML.slice(0,100000))}));
-  const result={employeeId:employee.id,mode,startedAt,finishedAt:new Date().toISOString(),clicks,requests,dom,imported:sanitize(imported)};
-  context.off('request',capture);
-  await storeSessionCookies(employee.id,await context.cookies([LLK_BASE]));
-  await saveJson(join(DATA,`navigation-${mode}.json`),sanitize(result));
-  await context.close();
-  navigationRecording=null;
-  return {mode,url:dom.url,clicks:clicks.length,requests:requests.length,tables:dom.tables.length,importedEntries:imported?.scannedEntries||0,importedActivities:imported?.candidate?.activities?.length||0};
-}
-
-async function verificationDiagnostics(id) {
-  const {context}=await launchEmployee(id);
-  try {
-    const page=await context.newPage();
-    await page.goto(`${LLK_BASE}/verifikasi`,{waitUntil:'domcontentloaded'});
-    if(!llkLocation(page.url()).authenticated)throw new HttpError(401,'Sesi LLK kedaluwarsa; login ulang diperlukan');
-    return page.evaluate(()=>{
-      const text=node=>String(node?.textContent||'').replace(/\s+/g,' ').trim();
-      const attrs=node=>Object.fromEntries([...node.attributes].map(attr=>[attr.name,attr.value]));
-      return {url:location.href,radios:[...document.querySelectorAll('input[type="radio"]')].map(node=>({name:node.name,value:node.value,checked:node.checked,label:text(node.closest('label')||node.parentElement)})),badges:[...document.querySelectorAll('.badge,.label,span')].filter(node=>/^\d+$/.test(text(node))).slice(0,20).map(node=>({text:text(node),attrs:attrs(node)})),rows:[...document.querySelectorAll('table tbody > tr')].slice(0,5).map(row=>({text:text(row).slice(0,500),controls:[...row.querySelectorAll('a,button,input')].map(node=>({tag:node.tagName,type:node.type||'',text:text(node),attrs:attrs(node)}))})),forms:[...document.forms].map(form=>({action:form.action,method:form.method,fields:[...form.elements].map(node=>({name:node.name,value:node.value,type:node.type,attrs:attrs(node)}))}))};
-    });
-  } finally {await context.close();}
+  } catch(error){
+    if(owned){preservedVerificationContexts.set(id,{context,failedAt:new Date().toISOString()});await storeSessionCookies(id,await context.cookies()).catch(()=>{});progress(id,'error',`Pemindaian gagal; sesi Edge tetap terbuka untuk diperiksa: ${error.message}`,{url:context.pages()[0]?.url()||''});}
+    else progress(id,'error',`Pemindaian gagal: ${error.message}`);
+    throw error;
+  } finally {if(owned&&!preservedVerificationContexts.has(id))await context.close();}
 }
 
 const verificationListUrl=()=>`${LLK_BASE}/verifikasi?start_date=&end_date=&status=1&by=nip&q=`;
-const verificationPayload=(hllk,message)=>({hllk:String(hllk),redirect:verificationListUrl(),note:clean(message),verified:'2'});
 async function runAutomaticVerification(id,input) {
-  const message=clean(input.message);
-
+  const message=clean(input.message),stage=stagedVerification.get(id);
   if(!message)bad('Pesan verifikasi wajib diisi');
-  const preview=await verificationTargets(id);
-  const selected=new Set(Array.isArray(input.hllk)?input.hllk.map(String):[]);
-  const targets=selected.size?preview.filter(item=>selected.has(item.hllk)):preview;
+  if(!stage||stage.expires<Date.now()||stage.token!==clean(input.stageToken))throw new HttpError(409,'Hasil pemindaian sudah kedaluwarsa. Pindai ulang sebelum verifikasi.');
+  const selected=new Set(Array.isArray(input.hllk)?input.hllk.map(String):[]),targets=selected.size?stage.targets.filter(item=>selected.has(item.hllk)):stage.targets;
   if(!targets.length)bad('Tidak ada LLK berstatus Belum Diverifikasi');
-  const {context}=await launchEmployee(id);
+  const results=[];
   try {
-    const page=await context.newPage();
-    await page.goto(`${LLK_BASE}/verifikasi`,{waitUntil:'domcontentloaded'});
-    if(!llkLocation(page.url()).authenticated)throw new HttpError(401,'Sesi LLK kedaluwarsa; login ulang diperlukan');
-    const token=await extractCsrfToken(page,context);
-    const results=[];
-    for(const target of targets){
-      const payload=new URLSearchParams(verificationPayload(target.hllk,message));
-      if(token)payload.set('_token',token);
-      const response=await context.request.post(`${LLK_BASE}/verifikasi/update`,{headers:{'content-type':'application/x-www-form-urlencoded',referer:`${LLK_BASE}/verifikasi`},data:payload.toString(),maxRedirects:0});
-      results.push({hllk:target.hllk,status:response.status(),success:[200,302,303].includes(response.status())});
+    for(const [index,target] of targets.entries()){
+      progress(id,'verify-target',`Memverifikasi ${index+1}/${targets.length} dari hasil filter yang sama…`,{target:index+1,totalTargets:targets.length,hllk:target.hllk,date:target.date});
+      try {
+        const page=stage.context.pages()[0]??await stage.context.newPage();
+        await page.goto(target.editUrl,{waitUntil:'domcontentloaded',referer:stage.filter.url,timeout:60000});
+        const form=page.locator('form[action*="/verifikasi/update"]').first();
+        if(!await form.count())throw new Error('Form verifikasi tidak ditemukan pada LLK target');
+        const submitted=await Promise.all([page.waitForLoadState('domcontentloaded',{timeout:30000}).catch(()=>{}),form.evaluate((node,note)=>{const set=(name,value)=>{const field=node.querySelector(`[name="${name}"]`);if(!field)return false;field.value=value;field.dispatchEvent(new Event('input',{bubbles:true}));field.dispatchEvent(new Event('change',{bubbles:true}));return true;};if(!set('note',note)||!set('verified','2'))throw new Error('Kolom catatan atau status verifikasi tidak ditemukan');node.requestSubmit();},message)]);
+        if(!llkLocation(page.url()).authenticated)throw new Error('Sesi LLK kedaluwarsa saat mengirim verifikasi');
+        results.push({hllk:target.hllk,date:target.date,status:200,success:true,url:page.url()});
+      } catch(error) { results.push({hllk:target.hllk,date:target.date,status:0,success:false,error:error.message}); }
     }
-    await audit('verification.auto',id,{message,targetIds:targets.map(item=>item.hllk)},{counts:{total:results.length,success:results.filter(item=>item.success).length},result:'completed'});
-    return {total:results.length,success:results.filter(item=>item.success).length,failed:results.filter(item=>!item.success).length,results};
-  } finally {await context.close();}
+    await audit('verification.auto',id,{message,targetIds:targets.map(item=>item.hllk),filter:stage.filter},{counts:{total:results.length,success:results.filter(item=>item.success).length},result:'completed'});
+    return {total:results.length,success:results.filter(item=>item.success).length,failed:results.filter(item=>!item.success).length,results,filter:stage.filter};
+  } finally { closeVerificationStage(id); }
 }
-
-function previewVerificationPayload(input){
-  const message=clean(input.message),hllk=clean(input.hllk);
-  if(!message)bad('Pesan verifikasi wajib diisi');
-  if(!/^\d+$/.test(hllk))bad('ID hllk tidak valid');
-  return {safe:true,submitted:false,method:'POST',url:`${LLK_BASE}/verifikasi/update`,payload:verificationPayload(hllk,message)};
-}
-
 
 async function archivePersonal(id,current){if(!current)return;const dir=personalHistoryDir(id);await mkdir(dir,{recursive:true});await saveJson(join(dir,`${String(current.version||0).padStart(6,'0')}-${Date.now()}.json`),current);await rotateFiles(dir,'');}
 async function applyPersonal(id,input){const stage=stagedPersonal.get(id);if(!stage||stage.expires<Date.now()||input.stageToken!==stage.token||input.confirm!==id)throw new HttpError(409,'Stage token atau konfirmasi tidak cocok');const current=await readPersonal(id);await archivePersonal(id,current);await saveJson(personalFile(id),stage.candidate);stagedPersonal.delete(id);await audit('personal-template.apply',id,{employeeId:id,digest:stage.digest},{counts:{activities:stage.candidate.activities.length},result:'applied'});return personalResponse(await findEmployee(id));}
 async function resetPersonal(id,input){if(input.confirm!==id)bad('Konfirmasi ID pegawai wajib sama');await findEmployee(id);const current=await readPersonal(id);if(current){await archivePersonal(id,current);await rm(personalFile(id),{force:true});}stagedPersonal.delete(id);await audit('personal-template.reset',id,{employeeId:id},{result:'reset'});return personalResponse(await findEmployee(id));}
-async function allPersonal(){await mkdir(personalTemplateRoot,{recursive:true});const out={};for(const name of await readdir(personalTemplateRoot))if(name.endsWith('.json')){const id=name.slice(0,-5);try{out[id]=validatePersonal(await readJson(join(personalTemplateRoot,name)),id);}catch{}}return out;}
-async function restorePersonal(input){if(!input||typeof input!=='object'||Array.isArray(input))bad('personalTemplates tidak valid');await mkdir(personalTemplateRoot,{recursive:true});for(const [rawId,value] of Object.entries(input)){const id=safeId(rawId);await findEmployee(id);await saveJson(personalFile(id),validatePersonal(value,id));}}
 
 async function api(req,res,url) {
   const path=url.pathname;
   if(req.method==='GET'&&path==='/api/progress'){const id=safeId(url.searchParams.get('employeeId')),since=Math.max(0,Number(url.searchParams.get('since'))||0);return json(res,200,progressState(id,since));}
-  if(req.method==='GET'&&path==='/api/settings')return json(res,200,await getSettings());
-  if(req.method==='POST'&&path==='/api/settings'){const input=await bodyJson(req);return json(res,200,await saveSettings(input));}
-  if(req.method==='GET'&&path==='/api/verification/diagnostics'){const id=safeId(url.searchParams.get('employeeId'));return json(res,200,await verificationDiagnostics(id));}
-  if(req.method==='GET'&&path==='/api/holidays')return json(res,200,await getHolidayObject());
-  if(req.method==='GET'&&path==='/api/supervisor-lookup')return json(res,200,await googleSupervisorLookup(url.searchParams.get('nip')));
-  if(req.method==='POST'&&path==='/api/holidays'){const input=await bodyJson(req);if(!input||typeof input!=='object')bad('Data hari libur tidak valid');await saveJson(holidayFile,input);await audit('holidays.update','local',input,{result:'saved'});return json(res,200,input);}
+  if(req.method==='GET'&&path==='/api/calendar/2026')return json(res,200,{year:2026,source:'SKB 3 Menteri',days:SKB_2026_DAYS});
   if(req.method==='GET'&&path==='/api/employees')return json(res,200,await getEmployees());
-  if(req.method==='GET'&&path==='/api/workflow/llk-to-verification/dry-run'){const id=safeId(url.searchParams.get('employeeId'));return json(res,200,await dryRunLlkToVerification(id));}
-  if(req.method==='GET'&&path==='/api/verifier')return json(res,200,existsSync(verifierFile)?await readJson(verifierFile):{employees:[]});
-  if(req.method==='POST'&&path==='/api/verifier/import'){const input=await bodyJson(req);return json(res,200,await withLock(safeId(input.employeeId),()=>importVerifier(safeId(input.employeeId))));}
   if(req.method==='GET'&&path==='/api/templates')return json(res,200,await templateSnapshot());
-  if(req.method==='GET'&&path==='/api/templates/history'){await mkdir(templateHistoryRoot,{recursive:true});return json(res,200,{versions:(await readdir(templateHistoryRoot)).filter(x=>x.endsWith('.json')).sort().reverse().slice(0,MAX_HISTORY)});}
-  if(req.method==='POST'&&path==='/api/templates/diff'){const input=await bodyJson(req),current=await templateSnapshot(),next=validateTemplates(input.departments||input);return json(res,200,{fromVersion:current.version,changed:Object.keys(next).filter(k=>canonical(next[k])!==canonical(current.departments[k])),removed:Object.keys(current.departments).filter(k=>!next[k])});}
-  if(req.method==='POST'&&path==='/api/templates/apply')return json(res,200,await applyTemplates(await bodyJson(req),'local'));
   if(req.method==='DELETE'&&path.startsWith('/api/profiles/')){const id=safeId(decodeURIComponent(path.slice('/api/profiles/'.length))),input=await bodyJson(req);if(input.confirm!==id)bad('Konfirmasi ID pegawai wajib sama');if(locks.has(id))throw new HttpError(409,'Profil sedang digunakan');await rm(profilePath(id),{recursive:true,force:true});await audit('profile.delete',id,{employeeId:id},{result:'deleted'});return json(res,200,{deleted:true,employeeId:id});}
-  if(req.method==='GET'&&path==='/api/config/backup'){const backup={version:2,createdAt:new Date().toISOString(),employees:await getEmployees(),templates:await templateSnapshot(),personalTemplates:await allPersonal()};return json(res,200,backup,{'content-disposition':`attachment; filename="llk-backup-${localIso(new Date())}.json"`});}
-  if(req.method==='POST'&&path==='/api/config/restore'){const input=await bodyJson(req);if(![1,2].includes(input.version))bad('Versi backup tidak didukung');const employees=validateEmployeeArray(input.employees),templates=input.templates?.departments||input.templates;await saveJson(employeeFile,employees);await applyTemplates(templates,'local');if(input.version===2)await restorePersonal(input.personalTemplates||{});return json(res,200,{restored:true,employees:employees.length});}
-  if(req.method==='POST'&&path==='/api/roster/diff')return json(res,200,await rosterDiff());
-  if(req.method==='POST'&&path==='/api/roster/apply')return json(res,200,await applyRoster());
   if(req.method==='POST'&&path==='/api/verification/run'){const input=await bodyJson(req),id=safeId(input.employeeId);return json(res,200,await runAutomaticVerification(id,input));}
-  if(req.method==='GET'&&path==='/api/verification/preview'){const id=safeId(url.searchParams.get('employeeId'));const targets=await verificationTargets(id);return json(res,200,{targets,total:targets.length,pagesScanned:targets.pagesScanned||1,rowsFound:targets.rowsFound??targets.length,validCount:targets.validCount??targets.length,invalidCount:targets.invalidCount||0,invalidTargets:targets.invalidTargets||[]});}
-  if(req.method==='GET'&&path==='/api/navigation-recording/status')return json(res,200,{active:Boolean(navigationRecording),...(navigationRecording?{mode:navigationRecording.mode,url:navigationRecording.page.url(),startedAt:navigationRecording.startedAt}:{}),recorded:{llk:existsSync(join(DATA,'navigation-llk.json')),verifikasi:existsSync(join(DATA,'navigation-verifikasi.json'))}});
-  if(req.method==='POST'&&path==='/api/navigation-recording/start')return json(res,200,await startNavigationRecording(await bodyJson(req)));
-  if(req.method==='POST'&&path==='/api/navigation-recording/finish')return json(res,200,await finishNavigationRecording());
-  if(req.method==='POST'&&path==='/api/verification-scan-recording/start')return json(res,200,await startVerificationScanRecording(await bodyJson(req)));
-  if(req.method==='POST'&&path==='/api/verification-scan-recording/finish')return json(res,200,await finishVerificationScanRecording());
+  if(req.method==='GET'&&path==='/api/verification/preview'){const id=safeId(url.searchParams.get('employeeId')),preserved=preservedVerificationContexts.get(id),session=preserved?null:await launchEmployee(id,false),context=preserved?.context||session.context;try{const targets=await verificationTargets(id,context),stage=stageVerification(id,context,targets,{status:'1',by:'nip',url:verificationListUrl(),pagesScanned:targets.pagesScanned||1,rowsFound:targets.rowsFound??targets.length});preservedVerificationContexts.delete(id);return json(res,200,{stageToken:stage.token,targets,total:targets.length,pagesScanned:targets.pagesScanned||1,rowsFound:targets.rowsFound??targets.length,validCount:targets.validCount??targets.length,invalidCount:targets.invalidCount||0,invalidTargets:targets.invalidTargets||[],filter:stage.filter});}catch(error){preservedVerificationContexts.set(id,{context,failedAt:new Date().toISOString()});await storeSessionCookies(id,await context.cookies()).catch(()=>{});throw error;}}
   if(req.method==='POST'&&path==='/api/bootstrap/login'){
     const input=await bodyJson(req);
     const supervisorNip=employeeId(input.supervisorNip);
     if(!supervisorNip)bad('NIP atasan wajib diisi');
-    const lookup=supervisorLookups.get(clean(input.supervisorLookupToken));
-    if(!lookup||lookup.expires<Date.now()||lookup.nip!==supervisorNip||input.supervisorConfirmed!==true)throw new HttpError(409,'Periksa hasil Google Search dan konfirmasi identitas atasan terlebih dahulu');
     const satker=clean(input.satker)||'Satker Lain';
     const {employee,context,tempId}=await launchExternalBootstrap(satker,supervisorNip,input.department);
     const flow={employee,context,createdAt:new Date().toISOString(),expiresAt:new Date(Date.now()+LOGIN_FLOW_TTL).toISOString(),closing:false};
@@ -908,51 +695,47 @@ async function api(req,res,url) {
   }
   if(req.method==='POST'&&path==='/api/bootstrap/complete'){
     const input=await bodyJson(req),tempId=safeId(input.tempId);
-    const flow=loginFlows.get(tempId);
-    if(!flow)throw new HttpError(409,'Sesi login eksternal tidak aktif atau kedaluwarsa');
+    let flow=loginFlows.get(tempId);
+    if(!flow)flow=[...loginFlows.entries()].find(([id,f])=>id.startsWith('temp-')&&!f.closing&&authenticatedLlkPage(f.context))?.[1]||null;
+    if(!flow){
+      const supervisorNip=employeeId(input.supervisorNip);
+      const employees=await getEmployees();
+      let recovered=null;
+      for(const emp of employees){
+        const cookies=await loadSessionCookies(emp.id);
+        if(!cookies?.length)continue;
+        const {context}=await launchEmployee(emp.id,true);
+        const page=context.pages()[0]??await context.newPage();
+        await page.goto(LLK_BASE,{waitUntil:'domcontentloaded',timeout:30000}).catch(()=>{});
+        if(llkLocation(page.url()).authenticated){recovered={employee:emp,context};break;}
+        await context.close();
+      }
+      if(!recovered)throw new HttpError(401,'Sesi LLK tidak ditemukan dari cookie tersimpan. Buka SSO dari profil aktif dan login sekali lagi.');
+      flow={employee:recovered.employee,context:recovered.context,createdAt:new Date().toISOString(),expiresAt:new Date(Date.now()+LOGIN_FLOW_TTL).toISOString(),closing:false,recovered:true};
+      loginFlows.set(tempId,flow);
+    }
     return json(res,200,await completeExternalBootstrap(tempId,flow.employee,flow.context));
-  }
-  if(req.method==='POST'&&path==='/api/verification-recording/start')return json(res,200,await startVerificationRecording(await bodyJson(req)));
-  if(req.method==='POST'&&path==='/api/verification-recording/finish')return json(res,200,await finishVerificationRecording());
-  if(req.method==='POST'&&path==='/api/employees'){
-    const input=await bodyJson(req),id=employeeId(input.nip);
-    if(id.length<8)bad('NIP pegawai minimal 8 digit angka');
-    const satker=clean(input.satker)||'Pengadilan Negeri Natuna';
-    const position=clean(input.position)||'Pegawai / Pelaksana';
-    const department=clean(input.department)||'umum_keuangan';
-    const supervisorNip=employeeId(input.supervisorNip||input.supervisor?.nip);
-    const supervisorName=clean(input.supervisorName||input.supervisor?.name)||'Atasan Langsung';
-    const supervisorId=clean(input.supervisorId||input.supervisor?.id||supervisorNip);
-    const supervisor={id:supervisorId,nip:supervisorNip,name:supervisorName};
-    const name=clean(input.name)||`Pegawai NIP ${id}`;
-    const employees=await getEmployees(),employee={id,nip:id,name,position,department,satker,supervisor};
-    const index=employees.findIndex(e=>e.id===id);
-    index>=0?employees.splice(index,1,employee):employees.push(employee);
-    await saveJson(employeeFile,employees);
-    return json(res,200,employee);
   }
   const employeeRoute = path.match(/^\/api\/employees\/([^/]+)\/(.+)$/);
   if (!employeeRoute) return json(res,404,{error:'Endpoint tidak ditemukan'});
   const id = safeId(decodeURIComponent(employeeRoute[1]));
   const action = employeeRoute[2];
   if(action==='personal-template'&&req.method==='GET')return json(res,200,await personalResponse(await findEmployee(id)));
-  if(action==='personal-template/import'&&req.method==='POST'){await bodyJson(req);return json(res,200,await withLock(id,()=>importPersonal(id)));}
+  if(action==='preview'&&req.method==='POST'){const input=await bodyJson(req);return json(res,200,await withLock(id,async()=>{const employee=await findEmployee(id),{context}=await launchEmployee(id);try{const source=input.source==='general'?'general':'page';progress(id,'preview-start',`Menyiapkan isian ${input.start} sampai ${input.end}…`);const page=context.pages()[0]??await context.newPage();let pageActivities=[];if(source==='page'){progress(id,'preview-llk','Membaca seluruh kegiatan unik pada halaman pertama LLK…');const entries=await scrapeEntries(context,page);pageActivities=[...new Map(entries.map(item=>[canonical({description:item.description,type:item.type}),item])).values()];progress(id,'preview-llk-done',`Halaman pertama LLK terbaca: ${entries.length||0} entri, ${pageActivities.length} kegiatan unik.`);}let enriched=employee;if(!employee.supervisor?.verified||!employee.satker||employee.satker==='Satker Lain'){progress(id,'preview-profile','Mengambil profil akun, satker, dan nama atasan dari LLK…');enriched=await enrichEmployeeFromSso(employee,page);}else{progress(id,'preview-profile-skip','Profil dan atasan sudah terverifikasi; melewati pengecekan ulang.');}progress(id,'preview-build',source==='general'?'Menyusun pratinjau dari template umum…':'Menyusun pratinjau dari halaman pertama LLK…');const preview=await generatePreview(enriched,input.start,input.end,source,input.department,pageActivities);progress(id,'preview-done',`Pratinjau siap: ${preview.length} hari kerja.`,{days:preview.length,source:source==='general'?'template-general':'llk-page-1'});return preview;}finally{await context.close();}}));}
   if(action==='personal-template/apply'&&req.method==='POST')return json(res,200,await applyPersonal(id,await bodyJson(req)));
   if(action==='personal-template'&&req.method==='DELETE')return json(res,200,await resetPersonal(id,await bodyJson(req)));
-  if(action==='preview'&&req.method==='POST'){const input=await bodyJson(req);return json(res,200,await generatePreview(await findEmployee(id),input.start,input.end,input.department));}
-  if(action==='report'&&req.method==='GET')return json(res,200,existsSync(reportFile(id))?await readJson(reportFile(id)):{results:[],success:0,failed:0});
-  if(action==='login'&&req.method==='POST')return json(res,200,await openLogin(id));
   if(action==='login/status'&&req.method==='GET'){const flow=loginFlows.get(id); if(!flow||flow.closing)return json(res,200,{active:false}); const pages=await pageDiagnostics(flow.context), authenticated=Boolean(authenticatedLlkPage(flow.context)); return json(res,200,{active:true,authenticated,createdAt:flow.createdAt,expiresAt:flow.expiresAt,pages});}
   if(action==='login/complete'&&req.method==='POST')return json(res,200,await completeLogin(id));
   if(action==='login/cancel'&&req.method==='POST')return json(res,200,{active:false,cancelled:await closeLoginFlow(id)});
-  if(action==='verify'&&req.method==='GET')return json(res,200,await withLock(id,()=>verifyLogin(id)));
-  if(action==='audit'&&req.method==='GET')return json(res,200,await withLock(id,()=>auditEntries(id)));
-  if((action==='submit'||action==='test-submit')&&req.method==='POST'){const input=await bodyJson(req);if(action==='test-submit'&&(!Array.isArray(input.preview)||input.preview.length!==1))bad('Tes live wajib tepat satu hari kerja');const report=await withLock(id,()=>submitPreview(id,input.preview,input.duplicatePolicy));await audit(action,id,input.preview,{counts:{submitted:report.success,failed:report.failed},result:'completed'});return json(res,200,sanitize(report));}
+  if(action==='login'&&req.method==='POST')return json(res,200,await openLogin(id));
+  if(action==='personal-template/import'&&req.method==='POST')return json(res,200,await withLock(id,()=>importPersonal(id)));
+  if(action==='submit'&&req.method==='POST'){const input=await bodyJson(req);const report=await withLock(id,()=>submitPreview(id,input.preview,input.duplicatePolicy));await audit('submit',id,input.preview,{counts:{submitted:report.success,failed:report.failed},result:'completed'});return json(res,200,sanitize(report));}
   return json(res,405,{error:'Metode tidak didukung'});
 }
 
 const mime={'.html':'text/html; charset=utf-8','.css':'text/css; charset=utf-8','.js':'text/javascript; charset=utf-8','.json':'application/json'};
-await mkdir(DATA,{recursive:true,mode:0o700}); await mkdir(PROFILE_ROOT,{recursive:true,mode:0o700}); await mkdir(templateHistoryRoot,{recursive:true,mode:0o700}); await mkdir(personalTemplateRoot,{recursive:true,mode:0o700}); await mkdir(personalHistoryRoot,{recursive:true,mode:0o700});
+await mkdir(DATA,{recursive:true,mode:0o700}); await mkdir(PROFILE_ROOT,{recursive:true,mode:0o700}); await mkdir(personalTemplateRoot,{recursive:true,mode:0o700}); await mkdir(personalHistoryRoot,{recursive:true,mode:0o700});
+for(const entry of await readdir(PROFILE_ROOT).catch(()=>[]))if(entry.startsWith('temp-'))await rm(join(PROFILE_ROOT,entry),{recursive:true,force:true}).catch(()=>{});
 if(process.platform!=='win32')await Promise.all([chmod(DATA,0o700),chmod(PROFILE_ROOT,0o700)]);
 const server=createServer(async(req,res)=>{try{const url=new URL(req.url,`http://${req.headers.host||'127.0.0.1'}`);if(url.pathname.startsWith('/api/'))return await api(req,res,url);let decoded;try{decoded=decodeURIComponent(url.pathname);}catch{bad('Path tidak valid');}const file=resolve(PUBLIC,decoded==='/'?'index.html':decoded.slice(1)),rel=relative(PUBLIC,file);if(rel.startsWith('..')||isAbsolute(rel))throw new HttpError(403,'Akses ditolak');res.writeHead(200,{'content-type':mime[extname(file)]||'application/octet-stream'});res.end(await readFile(file));}catch(error){if(!res.headersSent)json(res,error.status||400,{error:error.message||'Permintaan gagal'});else if(!res.writableEnded)res.end();}});
 server.listen(PORT,'127.0.0.1',()=>console.log(`LLK Agent PN Natuna: http://127.0.0.1:${PORT}`));

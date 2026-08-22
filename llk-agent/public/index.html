@@ -11,25 +11,10 @@
     <header class="court-header">
       <div>
         <h1 class="court-title">LLK Agent</h1>
-        <label class="court-sub" for="satkerSelect">Satuan kerja</label>
-        <select class="court-select" id="satkerSelect">
-          <option value="Pengadilan Negeri Natuna">Pengadilan Negeri Natuna</option>
-          <option value="other">Satker lainnya…</option>
-        </select>
-        <input class="court-custom" id="customSatker" placeholder="Ketik nama satuan kerja" hidden>
+        <span class="court-sub">Satuan kerja</span>
+        <output class="court-select court-select--readonly" id="satkerSelect">Satker lainnya</output>
       </div>
       <div class="header-actions">
-        <button class="btn btn-sm btn-primary" id="newEmployee" type="button">Tambah profil</button>
-        <form class="quick-other-box" id="employeeForm" hidden>
-          <label class="sr-only" for="quickSupervisorNip">NIP atasan langsung yang akan memverifikasi LLK</label>
-          <input class="court-custom" id="quickSupervisorNip" name="supervisorNip" inputmode="numeric" pattern="[0-9]{18}" minlength="18" maxlength="18" autocomplete="off" aria-describedby="quickSupervisorHelp" placeholder="18 digit NIP atasan langsung" required>
-          <small class="field-help" id="quickSupervisorHelp">Masukkan NIP atasan langsung yang berwenang memverifikasi LLK, bukan NIP pegawai yang dibuatkan profil.</small>
-          <button class="btn btn-sm btn-outline" id="lookupSupervisorBtn" type="button">Cari NIP di Google</button>
-          <div class="review-box" id="supervisorLookupResult" hidden></div>
-          <label class="check-row" id="supervisorLookupConfirmRow" hidden><input type="checkbox" id="supervisorLookupConfirm"> Hasil pencarian sudah saya periksa dan sesuai dengan atasan langsung.</label>
-          <button class="btn btn-sm btn-primary" id="quickSsoLoginBtn" type="submit">Login SSO &amp; buat profil</button>
-          <button class="btn btn-sm btn-outline" id="quickSsoFetchBtn" type="button" hidden>Saya sudah login</button>
-        </form>
         <div class="profile-chip">
           <span class="profile-dot" aria-hidden="true"></span>
           <div class="profile-meta">
@@ -38,25 +23,20 @@
           </div>
           <span class="court-badge" id="loginBadge">Belum masuk</span>
         </div>
+        <button class="btn btn-sm btn-primary" id="newEmployee" type="button">Tambah profil</button>
+        <select class="profile-picker" id="profilePicker" aria-label="Pilih profil aktif" hidden></select>
+        <form class="quick-other-box" id="employeeForm" hidden>
+          <div class="new-profile-context">
+            <strong>Profil baru</strong>
+            <small>Identitas dan satuan kerja dibaca dari akun SSO.</small>
+          </div>
+          <label class="sr-only" for="quickSupervisorNip">NIP atasan langsung yang akan memverifikasi LLK</label>
+          <input class="court-custom" id="quickSupervisorNip" name="supervisorNip" inputmode="numeric" pattern="[0-9]{18}" minlength="18" maxlength="18" autocomplete="off" aria-describedby="quickSupervisorHelp" placeholder="18 digit NIP atasan langsung" required>
+          <small class="field-help" id="quickSupervisorHelp">Masukkan NIP atasan langsung yang berwenang memverifikasi LLK.</small>
+          <button class="btn btn-sm btn-primary" id="quickSsoLoginBtn" type="submit">Login SSO &amp; buat profil</button>
+          <button class="btn btn-sm btn-outline" id="quickSsoFetchBtn" type="button" hidden>Saya sudah login</button>
+        </form>
       </div>
-    <dialog id="navigationRecorderDialog" class="recorder-dialog">
-      <form method="dialog" class="recorder-card">
-        <div class="panel-title">
-          <span>Rekam Navigasi LLK</span>
-          <button class="quiet-action" value="cancel" type="submit">Tutup</button>
-        </div>
-        <p class="field-help">Pilih alur. Edge akan terbuka. Klik menu tujuan dan tampilkan daftar datanya, lalu kembali ke popup ini dan selesaikan rekaman.</p>
-        <div class="mode-switch">
-          <label class="mode-option"><input type="radio" name="navigationRecordMode" value="llk" checked> <span><strong>Daftar LLK</strong><small>Rekam cara membuka menu LLK dan tabel kegiatan.</small></span></label>
-          <label class="mode-option"><input type="radio" name="navigationRecordMode" value="verifikasi"> <span><strong>Daftar Verifikasi</strong><small>Rekam cara membuka menu Verifikasi LLK dan daftar target.</small></span></label>
-        </div>
-        <div class="button-row">
-          <button class="btn btn-primary" id="startNavigationRecordingBtn" type="button">Buka Edge &amp; mulai rekam</button>
-          <button class="btn btn-outline" id="finishNavigationRecordingBtn" type="button" disabled>Selesai rekam</button>
-        </div>
-        <p class="inline-feedback" id="navigationRecorderStatus">Siap merekam.</p>
-      </form>
-    </dialog>
     </header>
 
     <p id="appFeedback" class="inline-feedback" role="status" aria-live="polite" hidden></p>
@@ -102,21 +82,37 @@
                 <button class="btn btn-sm btn-outline" type="button" data-preset="week">Minggu Ini</button>
                 <button class="btn btn-sm btn-outline" type="button" data-preset="month">Bulan Ini</button>
               </div>
-              <div class="form-group">
-                <label for="workTemplateSelect">Template bagian</label>
-                <select class="form-control" id="workTemplateSelect"></select>
-                <p class="field-help">Pilih bagian yang kegiatannya digunakan untuk membuat LLK.</p>
-              </div>
-              <div class="date-grid">
-                <div class="form-group">
-                  <label for="startDate">Mulai</label>
-                  <input class="form-control" type="date" id="startDate">
+              <fieldset class="source-picker">
+                <legend>Sumber kegiatan</legend>
+                <label class="source-option"><input type="radio" name="activitySource" value="page" checked><span><strong>Halaman terakhir LLK</strong><small>Default · memakai kegiatan unik pada halaman pertama daftar LLK.</small></span></label>
+                <label class="source-option"><input type="radio" name="activitySource" value="general"><span><strong>Template umum</strong><small>Pilih bagian pengadilan jika kegiatan halaman LLK tidak ingin digunakan.</small></span></label>
+                <div class="form-group source-department" id="sourceDepartmentWrap" hidden>
+                  <label for="sourceDepartmentSelect">Bagian pengadilan</label>
+                  <select class="form-control" id="sourceDepartmentSelect"></select>
                 </div>
-                <div class="form-group">
-                  <label for="endDate">Selesai</label>
-                  <input class="form-control" type="date" id="endDate">
-                </div>
+              </fieldset>
+              <div class="range-fields" aria-live="polite">
+                <div><span>Mulai</span><strong id="startDateLabel">Belum dipilih</strong></div>
+                <div><span>Selesai</span><strong id="endDateLabel">Belum dipilih</strong></div>
               </div>
+              <input type="hidden" id="startDate">
+              <input type="hidden" id="endDate">
+              <section class="calendar-picker" aria-label="Kalender kerja 2026">
+                <header class="calendar-header">
+                  <button class="quiet-action calendar-nav" id="calendarPrevBtn" type="button" aria-label="Bulan sebelumnya">Sebelumnya</button>
+                  <strong id="calendarMonthTitle"></strong>
+                  <button class="quiet-action calendar-nav" id="calendarNextBtn" type="button" aria-label="Bulan berikutnya">Berikutnya</button>
+                </header>
+                <div class="calendar-weekdays" aria-hidden="true"><span>Sen</span><span>Sel</span><span>Rab</span><span>Kam</span><span>Jum</span><span>Sab</span><span>Min</span></div>
+                <div class="calendar-grid" id="calendarGrid"></div>
+                <div class="calendar-legend" aria-label="Keterangan kalender">
+                  <span><i class="legend-national"></i>Libur nasional</span>
+                  <span><i class="legend-collective"></i>Cuti bersama</span>
+                  <span><i class="legend-weekend"></i>Sabtu/Minggu</span>
+                  <span><i class="legend-selected"></i>Rentang dipilih</span>
+                </div>
+                <p class="calendar-summary" id="calendarSummary">Pilih tanggal mulai dan selesai.</p>
+              </section>
               <div class="button-row">
                 <button class="btn btn-outline step-back" type="button" data-go-step="1">Kembali</button>
                 <button class="btn btn-primary" id="previewBtn" type="button">Siapkan LLK</button>
@@ -162,7 +158,6 @@
                     <option value="abort">Batalkan semua</option>
                   </select>
                 </div>
-                <div class="review-box" id="supervisorConfirmation" role="status"></div>
                 <label class="check-row">
                   <input type="checkbox" id="confirmCheck"> Saya memastikan data sesuai pekerjaan nyata.
                 </label>
@@ -209,7 +204,6 @@
             </div>
             <div class="emp-list" id="employeeList"></div>
             <p class="field-help">Profil baru ditambahkan dari menu <strong>Tambah profil</strong> di bagian atas. Cukup masukkan NIP atasan, lalu login SSO. Identitas pegawai dan kegiatan pada halaman pertama menu <code>/llk</code> dibaca otomatis.</p>
-            <button class="btn btn-outline btn-sm" id="openNavigationRecorderBtn" type="button">Rekam navigasi LLK</button>
             <button class="btn btn-danger btn-sm" id="deleteEmployeeBtn" type="button">Hapus profil aktif</button>
             <div class="form-group" id="deleteConfirmGroup" hidden>
               <label for="deleteConfirm">Ketik ID <code id="deleteTargetId">—</code></label>
@@ -218,97 +212,44 @@
             </div>
           </section>
 
-          <section class="advanced-section">
+          <section class="advanced-section" id="activityTemplateSection">
             <div class="panel-title">
-              <span>Hari libur</span>
-              <span id="holidayCount" class="tag-badge">—</span>
+              <span>Daftar kegiatan</span>
+              <span id="activityTemplateBadge" class="court-badge">Halaman LLK</span>
             </div>
-            <p class="field-help">Tanggal ini otomatis dikeluarkan dari pratinjau LLK.</p>
-            <form id="holidayForm" class="holiday-add-row">
-              <input class="form-control" id="holidayDate" type="date" required aria-label="Tanggal libur">
-              <button class="btn btn-primary btn-sm" type="submit">Tambah</button>
-            </form>
-            <div id="holidayList" class="holiday-list"></div>
-            <div class="button-row">
-              <label class="btn btn-sm btn-outline file-label">Impor JSON<input id="holidayImport" type="file" accept="application/json,.json" hidden></label>
-              <button class="btn btn-sm btn-outline" id="holidayExport" type="button">Ekspor</button>
+            <p class="field-help">Lihat kegiatan halaman terakhir LLK atau template umum per bagian dalam format yang sama. Semua hasil pengisian menggunakan <strong>Selesai</strong>.</p>
+            <div class="mode-switch template-source-switch" role="radiogroup" aria-label="Daftar kegiatan yang ditampilkan">
+              <label class="mode-option"><input type="radio" name="templateViewSource" value="page" checked><span><strong>Halaman terakhir LLK</strong><small>Daftar kegiatan aktual profil aktif.</small></span></label>
+              <label class="mode-option"><input type="radio" name="templateViewSource" value="general"><span><strong>Template umum</strong><small>Daftar standar berdasarkan bagian pengadilan.</small></span></label>
             </div>
-          </section>
-
-          <section class="advanced-section">
-            <div class="panel-title">
-              <span>Template umum</span>
-              <span id="templateVersion" class="tag-badge">—</span>
-            </div>
-            <p class="field-help">Daftar kegiatan standar per bagian. Pilih bagian untuk melihat isinya.</p>
-            <div class="form-group">
-              <label for="generalTemplateSelect">Bagian</label>
+            <div class="form-group" id="templateDepartmentWrap" hidden>
+              <label for="generalTemplateSelect">Bagian pengadilan</label>
               <select class="form-control" id="generalTemplateSelect"></select>
             </div>
-            <div class="table-scroll">
-              <table class="preview-table">
-                <thead><tr><th>Kegiatan</th><th>Jenis</th><th>Hasil</th></tr></thead>
-                <tbody id="generalTemplateBody"></tbody>
-              </table>
-            </div>
-          </section>
-
-          <section class="advanced-section" id="personalTemplateSection">
-            <div class="panel-title">
-              <span>Template personal</span>
-              <span id="personalTemplateSourceBadge" class="court-badge">Memuat…</span>
-            </div>
-            <p class="field-help" id="personalTemplateSessionNote">Impor membuka <code>https://llk.mahkamahagung.go.id/llk</code>, membaca halaman pertama daftar LLK, lalu membentuk pola kegiatan unik.</p>
-            <div class="personal-summary-strip">
-              <div><small>Sumber</small><strong id="personalTemplateSourceText">—</strong></div>
-              <div><small>Fallback</small><span id="personalTemplateFallbackText">—</span></div>
+            <div id="pageActivitySummary" class="personal-summary-strip">
+              <div><small>Sumber</small><strong id="personalTemplateSourceText">Halaman LLK</strong></div>
+              <div><small>Bagian profil</small><span id="personalTemplateFallbackText">—</span></div>
               <div><small>Kegiatan</small><span id="personalTemplateCount">—</span></div>
-            </div>
-            <div id="personalTemplateAuthAlert" class="validation-feedback" role="alert" hidden>
-              <span>Sesi LLK belum aktif.</span>
-              <button class="btn btn-sm btn-primary" id="personalTemplateLoginBtn" type="button">Buka SSO</button>
             </div>
             <div class="table-scroll">
               <table class="preview-table personal-activity-table">
-                <thead>
-                  <tr>
-                    <th>Kegiatan</th>
-                    <th>Waktu</th>
-                    <th>Jenis</th>
-                    <th>Hasil</th>
-                    <th>Statistik</th>
-                  </tr>
-                </thead>
-                <tbody id="personalTemplateBody"></tbody>
+                <thead><tr><th>Kegiatan</th><th>Waktu</th><th>Jenis</th><th>Hasil</th><th>Statistik</th></tr></thead>
+                <tbody id="activityTemplateBody"></tbody>
               </table>
             </div>
-            <div class="button-row">
-              <button class="btn btn-outline" id="importPersonalTemplateBtn" type="button">Impor halaman pertama LLK</button>
-              <button class="btn btn-danger btn-sm" id="resetPersonalTemplateBtn" type="button">Gunakan fallback</button>
+            <div class="button-row" id="pageActivityActions">
+              <button class="btn btn-outline" id="importPersonalTemplateBtn" type="button">Perbarui dari halaman pertama LLK</button>
+              <button class="btn btn-danger btn-sm" id="resetPersonalTemplateBtn" type="button">Hapus daftar tersimpan</button>
             </div>
             <div id="personalStageBox" class="review-box" hidden>
-              <div class="panel-title">
-                <span>Perubahan template</span>
-                <span id="personalStageSummary">—</span>
-              </div>
+              <div class="panel-title"><span>Perubahan daftar kegiatan</span><span id="personalStageSummary">—</span></div>
               <div class="table-scroll">
                 <table class="preview-table">
-                  <thead>
-                    <tr>
-                      <th>Status</th>
-                      <th>Deskripsi</th>
-                      <th>Waktu</th>
-                      <th>Jenis &amp; hasil</th>
-                      <th>Frekuensi</th>
-                      <th>Terakhir</th>
-                    </tr>
-                  </thead>
+                  <thead><tr><th>Status</th><th>Deskripsi</th><th>Waktu</th><th>Jenis &amp; hasil</th><th>Frekuensi</th><th>Terakhir</th></tr></thead>
                   <tbody id="personalStageDiffBody"></tbody>
                 </table>
               </div>
-              <label class="check-row">
-                <input type="checkbox" id="personalStageConfirm"> Perubahan sudah ditinjau.
-              </label>
+              <label class="check-row"><input type="checkbox" id="personalStageConfirm"> Perubahan sudah ditinjau.</label>
               <div class="button-row">
                 <button class="btn btn-primary" id="applyPersonalTemplateBtn" type="button" disabled>Terapkan</button>
                 <button class="btn btn-outline" id="cancelPersonalStageBtn" type="button">Batal</button>
@@ -316,14 +257,6 @@
             </div>
           </section>
 
-          <section class="advanced-section">
-            <div class="panel-title">
-              <span>Status layanan</span>
-              <span class="status status-success" id="lifecycleState">Aman</span>
-            </div>
-            <p class="field-help" id="lifecycleDetail">Bind: 127.0.0.1 · audit aktif</p>
-            <span class="court-badge" id="securityBadge">Lokal · 127.0.0.1</span>
-          </section>
         </div>
       </details>
     </div>

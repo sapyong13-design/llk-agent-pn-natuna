@@ -31,6 +31,7 @@ function log(message) {
   if (!box) return;
   const stamp = new Date().toLocaleTimeString('id-ID', { hour12: false });
   const entry = `[${stamp}] ${message}`;
+  const latest = $('#logLatest'); if (latest) latest.textContent = message;
   if (!box.dataset.touched) {
     box.dataset.touched = 'true';
     box.textContent = entry;
@@ -133,9 +134,8 @@ function activityRows(activities, sourceLabel) {
 
 function renderGeneralTemplate(key) {
   const groups = templates.departments || templates.templates || templates;
-  const group = groups?.[key], tbody = $('#activityTemplateBody');
+  const group = groups?.[key], tbody = $('#generalTemplateBody');
   if (tbody) tbody.innerHTML = activityRows(group?.activities || [], 'template umum');
-  const badge = $('#activityTemplateBadge'); if (badge) badge.textContent = group?.label || 'Template umum';
 }
 
 $('#generalTemplateSelect')?.addEventListener('change', event => renderGeneralTemplate(event.target.value));
@@ -174,6 +174,10 @@ async function loadApp() {
   $('#satkerSelect').textContent = satker || 'Satker lainnya';
   if (initial) selectEmployee(initial);
   log(`Sistem siap. Satker: ${satker || 'Satker lainnya'}. Profil aktif: ${initial?.name || 'Belum dipilih'}`);
+  if (!employees.length) {
+    setNewProfileMode(true);
+    feedback('Belum ada profil pegawai. Isi NIP atasan langsung, lalu login SSO untuk memulai.');
+  }
   const bootstrapStatus = await api('/api/bootstrap/status').catch(() => ({ active: [] }));
   const pendingBootstrap = bootstrapStatus.active?.[0];
   if (pendingBootstrap) {
@@ -572,8 +576,7 @@ function renderPersonalTemplate(info) {
   const sourceText = $('#personalTemplateSourceText'); if (sourceText) sourceText.textContent = 'Halaman terakhir LLK';
   const fallbackText = $('#personalTemplateFallbackText'); if (fallbackText) fallbackText.textContent = active?.department || info.fallbackLabel || '—';
   const countNode = $('#personalTemplateCount'); if (countNode) countNode.textContent = `${activities.length} kegiatan`;
-  const tbody = $('#activityTemplateBody'); if (tbody && document.querySelector('[name="templateViewSource"]:checked')?.value !== 'general') tbody.innerHTML = activityRows(activities, 'halaman LLK');
-  const badge = $('#activityTemplateBadge'); if (badge && document.querySelector('[name="templateViewSource"]:checked')?.value !== 'general') badge.textContent = 'Halaman LLK';
+  const tbody = $('#pageTemplateBody'); if (tbody) tbody.innerHTML = activityRows(activities, 'halaman LLK');
 }
 
 async function loadPersonalTemplate(employeeId) {
@@ -946,19 +949,10 @@ $('#importPersonalTemplateBtn')?.addEventListener('click', () => active && runBu
 document.querySelectorAll('[name="activitySource"]').forEach(input => input.addEventListener('change', () => {
   const general = document.querySelector('[name="activitySource"]:checked')?.value === 'general';
   $('#sourceDepartmentWrap').hidden = !general;
+  const srcLabel = $('#sourceSummaryText'); if (srcLabel) srcLabel.textContent = general ? 'Template umum' : 'Halaman terakhir LLK';
   if (general && active?.department) $('#sourceDepartmentSelect').value = active.department;
 }));
 
-document.querySelectorAll('[name="templateViewSource"]').forEach(input => input.addEventListener('change', () => {
-  const general = document.querySelector('[name="templateViewSource"]:checked')?.value === 'general';
-  $('#templateDepartmentWrap').hidden = !general;
-  $('#pageActivitySummary').hidden = general;
-  $('#pageActivityActions').hidden = general;
-  if (general) {
-    if (active?.department) $('#generalTemplateSelect').value = active.department;
-    renderGeneralTemplate($('#generalTemplateSelect').value);
-  } else if (active) loadPersonalTemplate(active.id);
-}));
 $('#personalStageConfirm')?.addEventListener('change', syncControls);
 
 $('#cancelPersonalStageBtn')?.addEventListener('click', () => {
@@ -1027,8 +1021,7 @@ $('#previewBtn')?.addEventListener('click', () => active && runBusy(async () => 
   if (refreshed) selectEmployee(refreshed);
   renderPreview(preview);
   setWizardStep(3);
-  log(`Pratinjau siap: ${preview.length} hari isian.`);
-}, 'Siapkan LLK'));
+}, 'Menyiapkan isian…'));
 
 $('#resetPersonalTemplateBtn')?.addEventListener('click', () => active && runBusy(async () => {
   log(`Menghapus daftar halaman LLK tersimpan untuk ${active.name}…`);

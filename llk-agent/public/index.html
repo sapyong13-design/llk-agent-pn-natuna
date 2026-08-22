@@ -71,8 +71,8 @@
           <div class="step-content">
             <div class="step-heading">
               <div>
-                <h2>Pilih pekerjaan</h2>
-                <p>Buat LLK pribadi atau verifikasi LLK anggota yang masih menunggu.</p>
+                <h2>Pilih tanggal LLK</h2>
+                <p>Tentukan rentang tanggal, lalu siapkan isian otomatis.</p>
               </div>
             </div>
             <div class="mode-switch" role="radiogroup" aria-label="Jenis pekerjaan">
@@ -85,15 +85,18 @@
                 <button class="btn btn-sm btn-outline" type="button" data-preset="week">Minggu Ini</button>
                 <button class="btn btn-sm btn-outline" type="button" data-preset="month">Bulan Ini</button>
               </div>
-              <fieldset class="source-picker">
-                <legend>Sumber kegiatan</legend>
-                <label class="source-option"><input type="radio" name="activitySource" value="page" checked><span><strong>Halaman terakhir LLK</strong><small>Default · memakai kegiatan unik pada halaman pertama daftar LLK.</small></span></label>
-                <label class="source-option"><input type="radio" name="activitySource" value="general"><span><strong>Template umum</strong><small>Pilih bagian pengadilan jika kegiatan halaman LLK tidak ingin digunakan.</small></span></label>
-                <div class="form-group source-department" id="sourceDepartmentWrap" hidden>
-                  <label for="sourceDepartmentSelect">Bagian pengadilan</label>
-                  <select class="form-control" id="sourceDepartmentSelect"></select>
-                </div>
-              </fieldset>
+              <details class="source-details">
+                <summary>Sumber kegiatan: <strong id="sourceSummaryText">Halaman terakhir LLK</strong></summary>
+                <fieldset class="source-picker">
+                  <legend class="sr-only">Sumber kegiatan</legend>
+                  <label class="source-option"><input type="radio" name="activitySource" value="page" checked><span><strong>Halaman terakhir LLK</strong><small>Default · memakai kegiatan unik pada halaman pertama daftar LLK.</small></span></label>
+                  <label class="source-option"><input type="radio" name="activitySource" value="general"><span><strong>Template umum</strong><small>Pilih bagian pengadilan jika kegiatan halaman LLK tidak ingin digunakan.</small></span></label>
+                  <div class="form-group source-department" id="sourceDepartmentWrap" hidden>
+                    <label for="sourceDepartmentSelect">Bagian pengadilan</label>
+                    <select class="form-control" id="sourceDepartmentSelect"></select>
+                  </div>
+                </fieldset>
+              </details>
               <div class="range-fields" aria-live="polite">
                 <div><span>Mulai</span><strong id="startDateLabel">Belum dipilih</strong></div>
                 <div><span>Selesai</span><strong id="endDateLabel">Belum dipilih</strong></div>
@@ -118,7 +121,7 @@
               </section>
               <div class="button-row">
                 <button class="btn btn-outline step-back" type="button" data-go-step="1">Kembali</button>
-                <button class="btn btn-primary" id="previewBtn" type="button">Siapkan LLK</button>
+                <button class="btn btn-primary" id="previewBtn" type="button">Pratinjau Isian LLK</button>
               </div>
             </div>
             <div id="verifyLlkMode" hidden>
@@ -185,13 +188,13 @@
         </li>
       </ol>
 
-      <section class="terminal-panel" aria-labelledby="progressTitle">
+      <details class="terminal-panel">
+        <summary><span class="terminal-prompt" id="progressTitle">Log aktivitas</span><span id="logLatest"></span></summary>
         <div class="terminal-header">
-          <span class="terminal-prompt" id="progressTitle">PROGRES</span>
           <button class="btn btn-sm btn-outline" id="clearLogBtn" type="button">Bersihkan</button>
         </div>
         <pre class="log-box" id="logBox" aria-live="polite">Menunggu proses…</pre>
-      </section>
+      </details>
 
       <details class="advanced-tools">
         <summary>Pengaturan lanjutan</summary>
@@ -218,32 +221,38 @@
           <section class="advanced-section" id="activityTemplateSection">
             <div class="panel-title">
               <span>Daftar kegiatan</span>
-              <span id="activityTemplateBadge" class="court-badge">Halaman LLK</span>
             </div>
-            <p class="field-help">Lihat kegiatan halaman terakhir LLK atau template umum per bagian dalam format yang sama. Semua hasil pengisian menggunakan <strong>Selesai</strong>.</p>
-            <div class="mode-switch template-source-switch" role="radiogroup" aria-label="Daftar kegiatan yang ditampilkan">
-              <label class="mode-option"><input type="radio" name="templateViewSource" value="page" checked><span><strong>Halaman terakhir LLK</strong><small>Daftar kegiatan aktual profil aktif.</small></span></label>
-              <label class="mode-option"><input type="radio" name="templateViewSource" value="general"><span><strong>Template umum</strong><small>Daftar standar berdasarkan bagian pengadilan.</small></span></label>
-            </div>
-            <div class="form-group" id="templateDepartmentWrap" hidden>
-              <label for="generalTemplateSelect">Bagian pengadilan</label>
-              <select class="form-control" id="generalTemplateSelect"></select>
-            </div>
-            <div id="pageActivitySummary" class="personal-summary-strip">
-              <div><small>Sumber</small><strong id="personalTemplateSourceText">Halaman LLK</strong></div>
-              <div><small>Bagian profil</small><span id="personalTemplateFallbackText">—</span></div>
-              <div><small>Kegiatan</small><span id="personalTemplateCount">—</span></div>
-            </div>
-            <div class="table-scroll">
-              <table class="preview-table personal-activity-table">
-                <thead><tr><th>Kegiatan</th><th>Waktu</th><th>Jenis</th><th>Hasil</th><th>Statistik</th></tr></thead>
-                <tbody id="activityTemplateBody"></tbody>
-              </table>
-            </div>
-            <div class="button-row" id="pageActivityActions">
-              <button class="btn btn-outline" id="importPersonalTemplateBtn" type="button">Perbarui dari halaman pertama LLK</button>
-              <button class="btn btn-danger btn-sm" id="resetPersonalTemplateBtn" type="button">Hapus daftar tersimpan</button>
-            </div>
+            <p class="field-help">Acuan isian: daftar dari halaman LLK profil aktif, atau template standar per bagian. Semua hasil pengisian memakai <strong>Selesai</strong>.</p>
+            <details class="template-details" open>
+              <summary>Halaman terakhir LLK · <small id="personalTemplateCount">—</small></summary>
+              <div id="pageActivitySummary" class="personal-summary-strip">
+                <div><small>Sumber</small><strong id="personalTemplateSourceText">Halaman LLK</strong></div>
+                <div><small>Bagian profil</small><span id="personalTemplateFallbackText">—</span></div>
+              </div>
+              <div class="table-scroll">
+                <table class="preview-table personal-activity-table">
+                  <thead><tr><th>Kegiatan</th><th>Waktu</th><th>Jenis</th><th>Hasil</th><th>Statistik</th></tr></thead>
+                  <tbody id="pageTemplateBody"></tbody>
+                </table>
+              </div>
+              <div class="button-row" id="pageActivityActions">
+                <button class="btn btn-outline" id="importPersonalTemplateBtn" type="button">Perbarui dari halaman pertama LLK</button>
+                <button class="btn btn-danger btn-sm" id="resetPersonalTemplateBtn" type="button">Hapus daftar tersimpan</button>
+              </div>
+            </details>
+            <details class="template-details">
+              <summary>Template umum per bagian</summary>
+              <div class="form-group">
+                <label for="generalTemplateSelect">Bagian pengadilan</label>
+                <select class="form-control" id="generalTemplateSelect"></select>
+              </div>
+              <div class="table-scroll">
+                <table class="preview-table">
+                  <thead><tr><th>Kegiatan</th><th>Waktu</th><th>Jenis</th><th>Hasil</th><th>Statistik</th></tr></thead>
+                  <tbody id="generalTemplateBody"></tbody>
+                </table>
+              </div>
+            </details>
             <div id="personalStageBox" class="review-box" hidden>
               <div class="panel-title"><span>Perubahan daftar kegiatan</span><span id="personalStageSummary">—</span></div>
               <div class="table-scroll">

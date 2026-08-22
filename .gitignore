@@ -1,5 +1,6 @@
-# Browser profiles contain cookies and authenticated sessions
+# Browser profiles and SSO session cookies contain authenticated sessions
 llk-agent/profiles/
+llk-agent/data/session-cookies.json
 
 # Runtime records and captured LLK requests
 llk-agent/data/audit.jsonl

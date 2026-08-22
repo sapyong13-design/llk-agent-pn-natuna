@@ -1,6 +1,6 @@
 # LLK Agent — PN Natuna
 
-Otomasi pengisian LLK harian untuk pegawai Pengadilan Negeri Negeri Natuna — dibuat karena **males nulis LLK tiap hari**.
+Otomasi pengisian LLK harian untuk pegawai Pengadilan Negeri Natuna — dibuat karena **males nulis LLK tiap hari**.
 
 ![Tampilan LLK Agent](docs/screenshot-main.png)
 

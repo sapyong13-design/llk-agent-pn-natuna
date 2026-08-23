@@ -740,17 +740,31 @@ function verificationList(items, state = 'ready') {
     return `<li class="verification-item verification-item--${ready ? 'ready' : 'failed'}"><span class="verification-number">${index + 1}</span><div class="verification-item-body"><div class="verification-item-head"><strong>${escapeHtml(item.date || item.hllk || 'Target tanpa tanggal')}</strong><span class="verification-status">${label}</span></div>${state === 'ready' && item.hllk ? `<code class="verification-id">ID LLK ${escapeHtml(item.hllk)}</code>` : ''}<p>${escapeHtml(detail || 'Rincian LLK tidak tersedia.')}</p></div></li>`;
   }).join('')}</ol>`;
 }
+function verificationRecovery(error) {
+  const loginRequired = error?.status === 401 || /kedaluwarsa|login ulang|sesi .*tidak/i.test(String(error?.message || ''));
+  const title = loginRequired ? 'Sesi LLK perlu diperbarui' : 'Pemindaian belum selesai';
+  const instruction = loginRequired ? 'Klik Buka SSO, login dengan profil aktif, pilih Saya sudah login, lalu kembali ke Verifikasi LLK Anggota.' : 'Klik Pindai Ulang. Jika pesan ini muncul lagi, buka SSO dan login ulang untuk membuat sesi baru.';
+  return `<section class="verification-recovery verification-recovery--${loginRequired ? 'login' : 'retry'}" role="alert"><div class="verification-recovery-mark" aria-hidden="true">!</div><div><strong>${title}</strong><p>${escapeHtml(instruction)}</p><button class="btn btn-outline btn-sm" type="button" data-go-step="1">${loginRequired ? 'Buka proses login' : 'Kembali ke login'}</button></div></section>`;
+}
 
 async function refreshWizardVerification() {
   if (!active) return;
-  const result = await api(`/api/verification/preview?employeeId=${encodeURIComponent(active.id)}`);
-  verificationTargets = (result.targets || []).filter(item => item.valid !== false); verificationStageToken = result.stageToken || null;
-  const count = $('#wizardVerificationCount');
-  if (count) count.textContent = `${result.validCount ?? verificationTargets.length} LLK siap diverifikasi · filter Belum Terverifikasi berdasarkan NIP terbukti aktif`;
-  const preview = $('#wizardVerificationPreview');
-  const held = Array.isArray(result.invalidTargets) ? result.invalidTargets : [];
-  if (preview) preview.innerHTML = `<div class="verification-filter"><span>Filter aktif</span><strong>Belum Terverifikasi</strong><span>berdasarkan NIP</span></div>${verificationTargets.length ? `<div class="verification-summary"><strong>${verificationTargets.length}</strong><span>LLK siap diverifikasi</span></div>${verificationList(verificationTargets)}` : '<p class="verification-empty">Tidak ada LLK anggota berstatus Belum Terverifikasi.</p>'}${held.length ? `<div class="verification-held"><strong>${held.length} LLK ditahan</strong><span>Belum lolos pemeriksaan sebelum verifikasi.</span></div>${verificationList(held)}` : ''}`;
-  $('#runWizardVerificationBtn').disabled = !verificationTargets.length;
+  try {
+    const result = await api(`/api/verification/preview?employeeId=${encodeURIComponent(active.id)}`);
+    verificationTargets = (result.targets || []).filter(item => item.valid !== false); verificationStageToken = result.stageToken || null;
+    const count = $('#wizardVerificationCount');
+    if (count) count.textContent = `${result.validCount ?? verificationTargets.length} LLK siap diverifikasi · filter Belum Terverifikasi berdasarkan NIP terbukti aktif`;
+    const preview = $('#wizardVerificationPreview');
+    const held = Array.isArray(result.invalidTargets) ? result.invalidTargets : [];
+    if (preview) preview.innerHTML = `<section class="verification-command"><div class="verification-filter verification-filter--active"><span>Filter aktif</span><strong>Belum Terverifikasi</strong><span>berdasarkan NIP</span></div>${verificationTargets.length ? `<div class="verification-summary"><strong>${verificationTargets.length}</strong><span>LLK siap diverifikasi</span></div>${verificationList(verificationTargets)}` : '<p class="verification-empty">Tidak ada LLK anggota berstatus Belum Terverifikasi.</p>'}${held.length ? `<div class="verification-held"><strong>${held.length} LLK ditahan</strong><span>Belum lolos pemeriksaan sebelum verifikasi.</span></div>${verificationList(held)}` : ''}</section>`;
+    $('#runWizardVerificationBtn').disabled = !verificationTargets.length;
+  } catch (error) {
+    verificationTargets = []; verificationStageToken = null;
+    $('#runWizardVerificationBtn').disabled = true;
+    const count = $('#wizardVerificationCount'); if (count) count.textContent = 'Verifikasi belum dapat dimulai';
+    const preview = $('#wizardVerificationPreview'); if (preview) preview.innerHTML = verificationRecovery(error);
+    throw error;
+  }
 }
 
 document.querySelectorAll('[name="workflowMode"]').forEach(input => input.addEventListener('change', () => {const verify = document.querySelector('[name="workflowMode"]:checked')?.value === 'verify';$('#createLlkMode').hidden = verify;$('#verifyLlkMode').hidden = !verify;if (verify) runBusy(refreshWizardVerification, 'Pindai LLK Anggota');}));
@@ -990,6 +1004,10 @@ $('#loginNextBtn')?.addEventListener('click', () => {
 });
 document.querySelectorAll('[data-go-step]').forEach(btn => {
   btn.addEventListener('click', () => setWizardStep(Number(btn.dataset.goStep)));
+});
+$('#wizardVerificationPreview')?.addEventListener('click', event => {
+  const button = event.target.closest('[data-go-step]');
+  if (button) setWizardStep(Number(button.dataset.goStep));
 });
 
 $('#previewCards')?.addEventListener('click', event => {

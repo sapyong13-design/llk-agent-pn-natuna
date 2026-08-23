@@ -31,7 +31,6 @@ function progressState(id,since=0){const current=operationProgress.get(id)||{seq
 const loginFlows = new Map();
 const sessionCookies = new Map();
 const stagedVerification = new Map();
-const preservedVerificationContexts = new Map();
 const VERIFICATION_STAGE_TTL = 10 * 60_000;
 function closeVerificationStage(id){const stage=stagedVerification.get(id);if(!stage)return;clearTimeout(stage.timer);stagedVerification.delete(id);stage.context?.close().catch(()=>{});}
 function stageVerification(id,context,targets,filter){closeVerificationStage(id);const token=randomBytes(16).toString('hex'),stage={token,context,targets,filter,expires:Date.now()+VERIFICATION_STAGE_TTL};stage.timer=setTimeout(()=>closeVerificationStage(id),VERIFICATION_STAGE_TTL);stagedVerification.set(id,stage);return stage;}
@@ -219,6 +218,7 @@ async function validatePreview(preview) {
 function pageDiagnostic(page){try{const url=new URL(page.url());return {origin:url.origin,pathname:url.pathname,title:''};}catch{return {origin:'null',pathname:'',title:''};}}
 async function pageDiagnostics(context){return Promise.all(context.pages().map(async page=>({...pageDiagnostic(page),title:clean(await page.title().catch(()=>''))})));}
 function llkLocation(value){try{const url=value instanceof URL?value:new URL(value);return {url,sameOrigin:url.origin===LLK_BASE,authenticated:url.origin===LLK_BASE&&!/^\/(?:sso|login)(?:\/|$)/i.test(url.pathname)};}catch{return {url:null,sameOrigin:false,authenticated:false};}}
+function verificationErrorMessage(error){const message=clean(error?.message||error);return /Target page, context or browser has been closed|browserContext\.(?:cookies|newPage)/i.test(message)?'Sesi verifikasi berakhir. Pindai ulang; jika berulang, buka SSO dan login ulang.':message;}
 function authenticatedLlkPage(context){return context.pages().find(page=>llkLocation(page.url()).authenticated);}
 async function requireAuthenticatedLlkPage(context){const page=authenticatedLlkPage(context);if(page)return page;const pages=await pageDiagnostics(context);throw new HttpError(401,`Login LLK belum terdeteksi. Halaman aktif: ${pages.map(({origin,pathname})=>`${origin}${pathname}`).join(', ')||'(tidak ada)'}`);}
 async function discoverLlkRoutes(page){return page.evaluate(base=>{const normalize=value=>String(value||'').replace(/\s+/g,' ').trim().toLowerCase();const routes=[];for(const element of document.querySelectorAll('a[href],form[action]')){try{const url=new URL(element.getAttribute('href')||element.getAttribute('action'),location.href);if(url.origin!==base)continue;routes.push({url:url.href,label:normalize(`${element.textContent||''} ${element.getAttribute('title')||''} ${element.getAttribute('aria-label')||''} ${url.pathname}`)});}catch{}}return routes;},LLK_BASE);}
@@ -504,11 +504,10 @@ async function completeLogin(id){
   await closeLoginFlow(id,flow);
   return {active:false,authenticated:true,stage:'complete',identity:verifier.verifier,employee,warning:warnings.join(' ')||null,warnings,verifier,history,autoApplied:false};
 }
-async function verificationTargets(id, existingContext, extractIds = true) {
-  const preserved=preservedVerificationContexts.get(id),owned=!existingContext&&!preserved,{context}=existingContext?{context:existingContext}:preserved?{context:preserved.context}:await launchEmployee(id,false);
-  progress(id,'launch','Membuka browser headless dan memuat sesi LLK…');
+async function verificationTargets(id, context, extractIds = true) {
+  progress(id,'launch','Memuat sesi LLK tersimpan di browser headless…');
   try {
-    const page=existingContext?(authenticatedLlkPage(context)??context.pages()[0]??await context.newPage()):await context.newPage();
+    const page=context.pages()[0]??await context.newPage();
     if(!llkLocation(page.url()).authenticated){
       await page.goto(LLK_BASE,{waitUntil:'domcontentloaded'});
       if(!llkLocation(page.url()).authenticated)throw new HttpError(401,'Sesi LLK kedaluwarsa; login ulang diperlukan');
@@ -631,10 +630,11 @@ async function verificationTargets(id, existingContext, extractIds = true) {
     progress(id,'complete',`Pemindaian selesai: ${uniqueTargets.length} target siap, ${uniqueTargets.invalidCount} ditahan.`,{validCount:uniqueTargets.length,invalidCount:uniqueTargets.invalidCount,pagesScanned:visited.size});
     return uniqueTargets;
   } catch(error){
-    if(owned){preservedVerificationContexts.set(id,{context,failedAt:new Date().toISOString()});await storeSessionCookies(id,await context.cookies()).catch(()=>{});progress(id,'error',`Pemindaian gagal; sesi Edge tetap terbuka untuk diperiksa: ${error.message}`,{url:context.pages()[0]?.url()||''});}
-    else progress(id,'error',`Pemindaian gagal: ${error.message}`);
+    const message=verificationErrorMessage(error);
+    if(message!==clean(error?.message||error))throw new HttpError(409,message);
+    progress(id,'error',`Pemindaian gagal: ${message}`);
     throw error;
-  } finally {if(owned&&!preservedVerificationContexts.has(id))await context.close();}
+  }
 }
 
 const verificationListUrl=()=>`${LLK_BASE}/verifikasi?start_date=&end_date=&status=1&by=nip&q=`;
@@ -656,7 +656,7 @@ async function runAutomaticVerification(id,input) {
         const submitted=await Promise.all([page.waitForLoadState('domcontentloaded',{timeout:30000}).catch(()=>{}),form.evaluate((node,note)=>{const set=(name,value)=>{const field=node.querySelector(`[name="${name}"]`);if(!field)return false;field.value=value;field.dispatchEvent(new Event('input',{bubbles:true}));field.dispatchEvent(new Event('change',{bubbles:true}));return true;};if(!set('note',note)||!set('verified','2'))throw new Error('Kolom catatan atau status verifikasi tidak ditemukan');node.requestSubmit();},message)]);
         if(!llkLocation(page.url()).authenticated)throw new Error('Sesi LLK kedaluwarsa saat mengirim verifikasi');
         results.push({hllk:target.hllk,date:target.date,status:200,success:true,url:page.url()});
-      } catch(error) { results.push({hllk:target.hllk,date:target.date,status:0,success:false,error:error.message}); }
+      } catch(error) { results.push({hllk:target.hllk,date:target.date,status:0,success:false,error:verificationErrorMessage(error)}); }
     }
     await audit('verification.auto',id,{message,targetIds:targets.map(item=>item.hllk),filter:stage.filter},{counts:{total:results.length,success:results.filter(item=>item.success).length},result:'completed'});
     return {total:results.length,success:results.filter(item=>item.success).length,failed:results.filter(item=>!item.success).length,results,filter:stage.filter};
@@ -675,7 +675,7 @@ async function api(req,res,url) {
   if(req.method==='GET'&&path==='/api/templates')return json(res,200,await templateSnapshot());
   if(req.method==='DELETE'&&path.startsWith('/api/profiles/')){const id=safeId(decodeURIComponent(path.slice('/api/profiles/'.length))),input=await bodyJson(req);if(input.confirm!==id)bad('Konfirmasi ID pegawai wajib sama');if(locks.has(id))throw new HttpError(409,'Profil sedang digunakan');await rm(profilePath(id),{recursive:true,force:true});await audit('profile.delete',id,{employeeId:id},{result:'deleted'});return json(res,200,{deleted:true,employeeId:id});}
   if(req.method==='POST'&&path==='/api/verification/run'){const input=await bodyJson(req),id=safeId(input.employeeId);return json(res,200,await runAutomaticVerification(id,input));}
-  if(req.method==='GET'&&path==='/api/verification/preview'){const id=safeId(url.searchParams.get('employeeId')),preserved=preservedVerificationContexts.get(id),session=preserved?null:await launchEmployee(id,false),context=preserved?.context||session.context;try{const targets=await verificationTargets(id,context),stage=stageVerification(id,context,targets,{status:'1',by:'nip',url:verificationListUrl(),pagesScanned:targets.pagesScanned||1,rowsFound:targets.rowsFound??targets.length});preservedVerificationContexts.delete(id);return json(res,200,{stageToken:stage.token,targets,total:targets.length,pagesScanned:targets.pagesScanned||1,rowsFound:targets.rowsFound??targets.length,validCount:targets.validCount??targets.length,invalidCount:targets.invalidCount||0,invalidTargets:targets.invalidTargets||[],filter:stage.filter});}catch(error){preservedVerificationContexts.set(id,{context,failedAt:new Date().toISOString()});await storeSessionCookies(id,await context.cookies()).catch(()=>{});throw error;}}
+  if(req.method==='GET'&&path==='/api/verification/preview'){const id=safeId(url.searchParams.get('employeeId')),{context}=await launchEmployee(id,true);try{const targets=await verificationTargets(id,context),stage=stageVerification(id,context,targets,{status:'1',by:'nip',url:verificationListUrl(),pagesScanned:targets.pagesScanned||1,rowsFound:targets.rowsFound??targets.length});return json(res,200,{stageToken:stage.token,targets,total:targets.length,pagesScanned:targets.pagesScanned||1,rowsFound:targets.rowsFound??targets.length,validCount:targets.validCount??targets.length,invalidCount:targets.invalidCount||0,invalidTargets:targets.invalidTargets||[],filter:stage.filter});}catch(error){await context.close().catch(()=>{});throw error;}}
   if(req.method==='POST'&&path==='/api/bootstrap/login'){
     const input=await bodyJson(req);
     const supervisorNip=employeeId(input.supervisorNip);
@@ -739,5 +739,5 @@ for(const entry of await readdir(PROFILE_ROOT).catch(()=>[]))if(entry.startsWith
 if(process.platform!=='win32')await Promise.all([chmod(DATA,0o700),chmod(PROFILE_ROOT,0o700)]);
 const server=createServer(async(req,res)=>{try{const url=new URL(req.url,`http://${req.headers.host||'127.0.0.1'}`);if(url.pathname.startsWith('/api/'))return await api(req,res,url);let decoded;try{decoded=decodeURIComponent(url.pathname);}catch{bad('Path tidak valid');}const file=resolve(PUBLIC,decoded==='/'?'index.html':decoded.slice(1)),rel=relative(PUBLIC,file);if(rel.startsWith('..')||isAbsolute(rel))throw new HttpError(403,'Akses ditolak');res.writeHead(200,{'content-type':mime[extname(file)]||'application/octet-stream'});res.end(await readFile(file));}catch(error){if(!res.headersSent)json(res,error.status||400,{error:error.message||'Permintaan gagal'});else if(!res.writableEnded)res.end();}});
 server.listen(PORT,'127.0.0.1',()=>console.log(`LLK Agent PN Natuna: http://127.0.0.1:${PORT}`));
-let stopping=false;const shutdown=async()=>{if(stopping)return;stopping=true;await Promise.all([...loginFlows].map(([id,flow])=>closeLoginFlow(id,flow)));server.close(()=>process.exit(0));setTimeout(()=>process.exit(1),10_000).unref();};
+let stopping=false;const shutdown=async()=>{if(stopping)return;stopping=true;await Promise.all([...loginFlows].map(([id,flow])=>closeLoginFlow(id,flow)));for(const id of stagedVerification.keys())closeVerificationStage(id);server.close(()=>process.exit(0));setTimeout(()=>process.exit(1),10_000).unref();};
 process.on('SIGINT',shutdown);process.on('SIGTERM',shutdown);

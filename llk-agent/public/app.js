@@ -1064,3 +1064,31 @@ document.addEventListener('DOMContentLoaded', () => {
     feedback(error.message, true);
   });
 });
+
+// Theme toggle — initial theme is applied pre-CSS by the inline head script
+// (localStorage choice, else system preference) so first paint never flashes.
+(function initThemeToggle() {
+  const STORAGE_KEY = 'llk-theme';
+  const root = document.documentElement;
+  const meta = document.getElementById('metaThemeColor');
+  const META_COLORS = { light: '#f4f5f0', dark: '#182128' };
+
+  let currentTheme = root.getAttribute('data-theme') === 'dark' ? 'dark' : 'light';
+
+  function applyTheme(theme) {
+    currentTheme = theme;
+    root.setAttribute('data-theme', theme);
+    try { localStorage.setItem(STORAGE_KEY, theme); } catch (e) { /* private mode */ }
+    if (meta) meta.setAttribute('content', META_COLORS[theme]);
+  }
+
+  // Sync browser chrome color with the pre-paint theme on load.
+  if (meta) meta.setAttribute('content', META_COLORS[currentTheme]);
+
+  const btn = document.getElementById('themeToggleBtn');
+  if (!btn) return;
+
+  btn.addEventListener('click', function () {
+    applyTheme(currentTheme === 'dark' ? 'light' : 'dark');
+  });
+})();

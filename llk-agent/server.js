@@ -250,41 +250,43 @@ async function scrapeEntries(context, existingPage) {
       empty.warning = 'Menu LLK tidak ditemukan pada halaman akun aktif.';
       return empty;
     }
-    const targetHref = await llkMenu.getAttribute('href');
     await llkMenu.click();
     await page.waitForURL(url => url.origin === LLK_BASE && /\/llk(?:\/|$|\?)/i.test(url.pathname + url.search), { timeout: 15000 }).catch(() => {});
     await page.waitForLoadState('domcontentloaded').catch(() => {});
-    await page.locator('table').first().waitFor({ state: 'visible', timeout: 15000 }).catch(() => {});
-    if (!/\/llk(?:\/|$)/i.test(new URL(page.url()).pathname)) {
+    if (!/^\/llk(?:\/|$)/i.test(new URL(page.url()).pathname)) {
       const empty = [];
       empty.available = false;
-      empty.warning = `Klik menu LLK tidak membuka daftar LLK${targetHref ? ` (${targetHref})` : ''}.`;
+      empty.warning = `Menu LLK tidak membuka daftar kegiatan: ${page.url()}.`;
       return empty;
     }
+    await page.locator('table').first().waitFor({ state: 'visible', timeout: 15000 }).catch(() => {});
     const sourceUrl = page.url();
     const entries = await page.evaluate(() => {
       const cleanText = value => String(value || '').replace(/\s+/g, ' ').trim();
+      const tables = [...document.querySelectorAll('table')];
       const output = [];
-      const outerTable = Array.from(document.querySelectorAll('table')).find(table => Array.from(table.tBodies[0]?.rows || []).some(row => Array.from(row.cells || []).some(cell => cell.querySelector('table'))));
-      if (!outerTable) return output;
-      for (const outerRow of Array.from(outerTable.tBodies[0]?.rows || [])) {
-        const detailCell = Array.from(outerRow.cells).find(cell => cell.querySelector('table'));
-        const nestedTable = detailCell?.querySelector('table');
-        if (!detailCell || !nestedTable) continue;
-        const headerText = cleanText(detailCell.querySelector('div')?.textContent || '');
-        const rawDate = (headerText.match(/Tanggal Kegiatan\s*:\s*([^,]+)/i) || [])[1] || '';
-        for (const row of Array.from(nestedTable.tBodies[0]?.rows || [])) {
-          const cells = Array.from(row.cells).map(cell => cleanText(cell.textContent));
-          if (cells.length < 6) continue;
-          const times = cells[1]?.match(/\b(?:[01]\d|2[0-3]):[0-5]\d\b/g) || [];
-          if (times.length < 2 || !cells[3] || /^istirahat$/i.test(cells[3])) continue;
-          output.push({rawDate,start:times[0],end:times[1],description:cells[3],type:/^(Utama|Pendukung)$/i.test(cells[4])?cells[4]:'Pendukung',result:cells[5]||'Selesai'});
+      for (const table of tables) {
+        const headers = [...table.querySelectorAll('thead th')].map(cell => cleanText(cell.textContent).toLowerCase());
+        const indexFor = pattern => headers.findIndex(header => pattern.test(header));
+        const timeIndex = indexFor(/jam|waktu/), activityIndex = indexFor(/kegiatan|uraian|aktivitas/), typeIndex = indexFor(/jenis/), resultIndex = indexFor(/hasil|output/);
+        for (const row of [...table.querySelectorAll('tbody tr')]) {
+          if (row.querySelector('table')) continue;
+          const cells = [...row.cells].map(cell => cleanText(cell.textContent));
+          const text = cleanText(cells.join(' '));
+          const times = text.match(/\b(?:[01]\d|2[0-3]):[0-5]\d\b/g) || [];
+          if (times.length < 2) continue;
+          const rawDate = (cleanText(row.closest('table')?.parentElement?.textContent).match(/Tanggal Kegiatan\s*:\s*([^,]+)/i) || text.match(/Tanggal Kegiatan\s*:\s*([^,]+)/i) || [])[1] || '';
+          const description = cells[activityIndex] || cells.find(cell => cell && !/^(?:\d+|(?:[01]\d|2[0-3]):[0-5]\d(?:\s*[-–]\s*(?:[01]\d|2[0-3]):[0-5]\d)?|Utama|Pendukung|Selesai)$/i.test(cell)) || '';
+          if (!description || /^istirahat$/i.test(description) || /^(?:no|jam|waktu|kegiatan|jenis|hasil)$/i.test(description)) continue;
+          const type = /^(Utama|Pendukung)$/i.test(cells[typeIndex]) ? cells[typeIndex] : (cells.find(cell => /^(Utama|Pendukung)$/i.test(cell)) || 'Pendukung');
+          const result = cells[resultIndex] || cells.find(cell => /^Selesai$/i.test(cell)) || 'Selesai';
+          output.push({ rawDate, start: times[0], end: times.at(-1), description, type, result });
         }
       }
       return output;
     });
-    const normalized = entries.map(entry => ({ ...entry, date: normalizeOfficialDate(entry.rawDate) })).filter(entry => entry.date);
-    normalized.sort((a,b) => b.date.localeCompare(a.date));
+    const normalized = entries.map(entry => ({ ...entry, date: normalizeOfficialDate(entry.rawDate) }));
+    normalized.sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
     normalized.available = true;
     normalized.sourceUrl = sourceUrl;
     normalized.pagesScanned = 1;
@@ -332,8 +334,8 @@ async function submitPreview(id, rawPreview, policy) {
         await page.goto(`${LLK_BASE}/profile`,{waitUntil:'domcontentloaded',timeout:60000});
         const token = await extractCsrfToken(page, context);
         await page.goto(`${LLK_BASE}/llk/create`,{waitUntil:'domcontentloaded',timeout:60000});
-        const selectedSupervisor=await resolveLlkSupervisor(context,employeeId(employee.supervisor.nip)||employee.supervisor.id);
-        const liveSupervisor={id:selectedSupervisor.id,nip:selectedSupervisor.nip,name:selectedSupervisor.name,fields:{nip:'recorded-api',name:'recorded-api'}};
+        const selectedSupervisor=await resolveLlkSupervisor(page,employeeId(employee.supervisor.nip)||employee.supervisor.id);
+        const liveSupervisor={id:selectedSupervisor.id,nip:selectedSupervisor.nip,name:selectedSupervisor.name,fields:{nip:'live-page-fetch',name:'live-page-fetch'}};
         if(!employeeId(liveSupervisor.nip)||!liveSupervisor.name)throw new Error('Lookup atasan tidak lengkap. Pengiriman dibatalkan.');
         const employees=await getEmployees(),employeeIndex=employees.findIndex(item=>item.id===employee.id);
         employee.supervisor={id:liveSupervisor.id,nip:liveSupervisor.nip,name:liveSupervisor.name};
@@ -416,51 +418,121 @@ async function templateSnapshot(){const templates=await readJson(templateFile);r
 async function readPersonal(id){return existsSync(personalFile(id))?validatePersonal(await readJson(personalFile(id)),id):null;}
 function validatePersonal(value,id){if(!value||typeof value!=='object'||value.employeeId!==id||!Array.isArray(value.activities)||value.activities.length>1000)bad('Daftar kegiatan profil tidak valid');const activities=value.activities.map(a=>{const nama=clean(a?.nama),kategori=clean(a?.kategori)||'Pendukung';if(!nama||/^istirahat$/i.test(nama)||!['Utama','Pendukung'].includes(kategori))bad('Kegiatan profil tidak valid');return {nama,kategori,result:'Selesai',...(a.start?{start:clean(a.start)}:{}),...(a.end?{end:clean(a.end)}:{}),...(a.count?{count:a.count}:{}),...(a.lastSeen?{lastSeen:a.lastSeen}:{})};});return {...sanitize(value),employeeId:id,activities};}
 async function personalResponse(employee){const personal=await readPersonal(employee.id),stored=await readJson(templateFile),departments=stored.departments||stored,fallback=departments[employee.department];return {source:personal?.activities?.length?'personal':'department',personal,activities:personal?.activities?.length?personal.activities:(fallback?.activities||[]),fallbackLabel:fallback?.label||employee.department};}
-async function importPersonal(id, existingContext, existingPage){
-  const employee=await findEmployee(id),owned=!existingContext,{context}=existingContext?{context:existingContext}:await launchEmployee(id);
+async function importPersonal(id, existingContext, existingPage) {
+  const employee = await findEmployee(id), owned = !existingContext, { context } = existingContext ? { context: existingContext } : await launchEmployee(id);
   try {
-    const entries=await scrapeEntries(context,existingPage),current=await readPersonal(id);
-    if(entries.available===false)return {available:false,current,candidate:null,warning:entries.warning||'Tahap riwayat: data LLK tidak tersedia; template pribadi tidak diubah.'};
-    const seen=new Map(), allEntries=Array.isArray(entries)?entries:[];
-    for(const entry of allEntries){
-      const nama=clean(entry.description);
-      if(!nama||/^istirahat$/i.test(nama))continue;
-      const activity={nama,kategori:/^(Utama|Pendukung)$/i.test(entry.type)?clean(entry.type):'Pendukung'};
-      const result=clean(entry.result||entry.output);if(result)activity.result=result;
-      const key=canonical(activity);
-      if(!seen.has(key))seen.set(key,{...activity,occurrences:1,lastSeen:entry.date||null});
-      else {const item=seen.get(key);item.occurrences+=1;if(entry.date&&(!item.lastSeen||entry.date>item.lastSeen))item.lastSeen=entry.date;}
+    const entries = await scrapeEntries(context, existingPage), current = await readPersonal(id);
+    if (entries.available === false) return { available: false, current, candidate: null, warning: entries.warning || 'Tahap riwayat: data LLK tidak tersedia; template pribadi tidak diubah.' };
+    const seen = new Map();
+    for (const entry of Array.isArray(entries) ? entries : []) {
+      const nama = clean(entry.description);
+      if (!nama || /^istirahat$/i.test(nama)) continue;
+      const activity = { nama, kategori: /^(Utama|Pendukung)$/i.test(entry.type) ? clean(entry.type) : 'Pendukung' };
+      const result = clean(entry.result || entry.output); if (result) activity.result = result;
+      const key = canonical(activity);
+      if (!seen.has(key)) seen.set(key, { ...activity, occurrences: 1, lastSeen: entry.date || null });
+      else { const item = seen.get(key); item.occurrences += 1; if (entry.date && (!item.lastSeen || entry.date > item.lastSeen)) item.lastSeen = entry.date; }
     }
-    const activities=[...seen.values()].sort((a,b)=>b.occurrences-a.occurrences||a.nama.localeCompare(b.nama,'id-ID')).map(({occurrences,lastSeen,...item})=>item);
-    if(!activities.length)return {available:false,current,candidate:null,warning:'Daftar LLK ditemukan, tetapi tidak ada kegiatan yang dapat dibaca. Template personal tidak diubah.'};
-    const candidate={version:1,updatedAt:new Date().toISOString(),employeeId:id,activities};
-    const stageToken=randomBytes(16).toString('hex'),digest=createHash('sha256').update(canonical(candidate)).digest('hex');
-    stagedPersonal.set(id,{stageToken,token:stageToken,digest,candidate,expires:Date.now()+15*60*1000});
-    return {available:true,current,candidate,activities,scannedEntries:allEntries.length,pagesScanned:entries.pagesScanned||1,sourceUrl:entries.sourceUrl||null,stageToken,digest,diff:{added:activities.length,modified:0,removed:current?.activities?.length||0}};
-  } finally {if(owned)await context.close();}
+    const activities = [...seen.values()].sort((a, b) => b.occurrences - a.occurrences || a.nama.localeCompare(b.nama, 'id-ID')).map(({ occurrences, lastSeen, ...item }) => item);
+    if (!activities.length) return { available: false, current, candidate: null, warning: 'Daftar LLK ditemukan, tetapi tidak ada kegiatan yang dapat dibaca. Template personal tidak diubah.' };
+    const candidate = { version: 1, updatedAt: new Date().toISOString(), employeeId: id, activities };
+    const stageToken = randomBytes(16).toString('hex'), digest = createHash('sha256').update(canonical(candidate)).digest('hex');
+    stagedPersonal.set(id, { stageToken, token: stageToken, digest, candidate, expires: Date.now() + 15 * 60 * 1000 });
+    return { available: true, current, candidate, activities, scannedEntries: entries.length, pagesScanned: entries.pagesScanned || 1, sourceUrl: entries.sourceUrl || null, stageToken, digest, diff: { added: activities.length, modified: 0, removed: current?.activities?.length || 0 } };
+  } finally { if (owned) await context.close(); }
 }
-async function resolveLlkSupervisor(context,nip){
-  const url=`${LLK_BASE}/llk/findPegawai?term=${encodeURIComponent(nip)}&_type=query&q=${encodeURIComponent(nip)}`;
-  const response=await context.request.get(url,{headers:{accept:'application/json',referer:`${LLK_BASE}/llk/create`},timeout:30000});
-  if(!response.ok())throw new Error(`Lookup NIP atasan gagal: HTTP ${response.status()}`);
-  const body=await response.json(),rows=Array.isArray(body)?body:body.results||body.data||[];
-  const candidate=rows.find(row=>employeeId(row.id||row.nip||row.value)===nip)||rows[0];
-  const rawName=candidate?.name||candidate?.nama||candidate?.pegawai||candidate?.label||candidate?.text||'';
-  const name=clean(rawName).replace(nip,'').replace(/^[-–—/\s]+|[-–—/\s]+$/g,'');
-  const id=clean(candidate?.id||candidate?.value||candidate?.pegawai_id||candidate?.nip||nip);
-  if(!candidate||!name||employeeId(name)===nip||!id)throw new Error(`Lookup NIP atasan tidak menemukan nama untuk ${nip}`);
-  return {id,nip,name,url};
+
+async function resolveLlkSupervisor(page, nip) {
+  const binding = await page.evaluate(() => {
+    const normalize = value => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    const nodes = [...document.querySelectorAll('label,td,th,span,div')];
+    const label = nodes.find(node => /^\*?\s*nip pejabat atasan\s*:?$/i.test(normalize(node.textContent)));
+    if (!label) return { url: location.href, text: normalize(document.body.innerText).slice(0, 500), nipControl: null, nameControl: null };
+    const row = label.closest('tr,.form-group,.control-group,.row') || label.parentElement;
+    const root = row?.parentElement || document;
+    const nipControl = row?.querySelector('input,select,[class*="select2-container"],[class*="select2-choice"]') || root.querySelector('input,select,[class*="select2-container"],[class*="select2-choice"]');
+    const nameLabel = nodes.find(node => /^\*?\s*pejabat atasan\s*:?$/i.test(normalize(node.textContent)) && node !== label);
+    const nameRow = nameLabel?.closest('tr,.form-group,.control-group,.row') || nameLabel?.parentElement;
+    const nameControl = nameRow?.querySelector('input:not([type="hidden"]),textarea');
+    return { url: location.href, nipControl: nipControl ? { id: nipControl.id, name: nipControl.getAttribute('name'), className: nipControl.className, tag: nipControl.tagName } : null, nameControl: nameControl ? { id: nameControl.id, name: nameControl.getAttribute('name') } : null };
+  });
+  if (!binding.nipControl) throw new Error(`Kontrol NIP Pejabat Atasan tidak ditemukan pada ${binding.url}: ${binding.text || ''}`);
+  const trigger = binding.nipControl.id === 'snip'
+    ? page.locator('.select2-selection[aria-labelledby="select2-snip-container"]').first()
+    : binding.nipControl.id
+      ? page.locator(`#${binding.nipControl.id} + .select2 .select2-selection, #${binding.nipControl.id} + [class*="select2-container"] [role="combobox"]`).first()
+      : page.locator(`[name="${binding.nipControl.name}"] + .select2 .select2-selection, [name="${binding.nipControl.name}"] + [class*="select2-container"] [role="combobox"]`).first();
+  if (!await trigger.count()) throw new Error(`Kontrol Select2 NIP Pejabat Atasan tidak terlihat untuk ${nip}`);
+  await trigger.click();
+  const search = page.locator('.select2-container--open .select2-search__field, .select2-drop-active .select2-input, .select2-search input').first();
+  await search.waitFor({ state: 'visible', timeout: 10000 });
+  await search.fill(nip);
+  const option = page.locator('.select2-results__option:not([aria-disabled="true"]), .select2-result-selectable').filter({ hasText: new RegExp(nip) }).first();
+  await option.waitFor({ state: 'visible', timeout: 15000 });
+  const resultText = clean(await option.textContent());
+  await option.click();
+  const nameField = binding.nameControl ? page.locator(`#${binding.nameControl.id}, [name="${binding.nameControl.name}"]`).first() : page.locator('input[readonly], input[disabled]').filter({ hasNot: page.locator('[type="hidden"]') }).last();
+  await nameField.waitFor({ state: 'visible', timeout: 10000 });
+  const name = clean(await nameField.inputValue());
+  if (!name) throw new Error(`Pilihan atasan belum mengisi nama untuk NIP ${nip}`);
+  return { id: nip, nip, name, url: page.url(), resultText, control: 'interactive-select2' };
 }
 async function enrichEmployeeFromSso(employee, page) {
   const originalUrl = page.url();
-  await page.goto(`${LLK_BASE}/profile`,{waitUntil:'domcontentloaded',timeout:60000});
-  const profile=await page.evaluate(()=>{const clean=value=>String(value||'').replace(/\s+/g,' ').trim(),read=label=>{const node=[...document.querySelectorAll('th,dt,label,div')].find(item=>clean(item.textContent)===label);const container=node?.closest('tr,dl,.row,.form-group')||node?.parentElement;const values=[...container?.querySelectorAll('td,dd,[class*="col-"]')||[]].map(item=>clean(item.textContent)).filter(value=>value&&value!==label);return values.at(-1)||'';};return {name:read('Nama Lengkap'),nip:read('NIP'),position:read('Jabatan'),satker:read('Satuan Kerja').replace(/^\(\d+\)\s*/,'')};});
-  await page.goto(`${LLK_BASE}/llk/create`,{waitUntil:'domcontentloaded',timeout:60000});
-  const requestedNip=employeeId(employee.supervisor.nip)||clean(employee.supervisor.id),lookup={attempted:false,nip:requestedNip,name:'',control:'recorded-api',select2:true};
-  if(requestedNip){const selected=await resolveLlkSupervisor(page.context(),requestedNip);lookup.attempted=true;lookup.name=selected.name;lookup.resultText=selected.name;lookup.url=selected.url;}
-  if(originalUrl&&originalUrl!==page.url())await page.goto(originalUrl,{waitUntil:'domcontentloaded'}).catch(()=>{});
-  const name=clean(profile.name),nip=employeeId(profile.nip),position=clean(profile.position),satker=clean(profile.satker),supervisorName=clean(lookup.name),updated={...employee,name:name.length>3?name:employee.name,nip:nip||employee.nip,position:position.length>3?position:employee.position,satker:satker.length>3?satker:employee.satker,supervisor:{id:requestedNip||employee.supervisor.id,nip:requestedNip||employee.supervisor.nip,name:supervisorName||employee.supervisor.name,verified:Boolean(requestedNip&&supervisorName),source:supervisorName?'llk-select2':'pending-lookup'},accountIdentity:{name,nip,position,satker},supervisorLookup:lookup};
-  const employees=await getEmployees(),index=employees.findIndex(item=>item.id===employee.id||item.nip===updated.nip);if(index>=0)employees.splice(index,1,updated);else employees.push(updated);await saveJson(employeeFile,employees);return updated;
+  await page.goto(`${LLK_BASE}/profile`, { waitUntil: 'domcontentloaded', timeout: 60000 });
+  const profile = await page.evaluate(() => {
+    const clean = value => String(value || '').replace(/\s+/g, ' ').trim();
+    const read = label => {
+      const node = [...document.querySelectorAll('th, dt, label, div')].find(item => clean(item.textContent) === label);
+      const container = node?.closest('tr, dl, .row, .form-group') || node?.parentElement;
+      const values = [...(container?.querySelectorAll('td, dd, [class*="col-"]') || [])].map(item => clean(item.textContent)).filter(value => value && value !== label);
+      return values.at(-1) || '';
+    };
+    return { name: read('Nama Lengkap'), nip: read('NIP'), position: read('Jabatan'), satker: read('Satuan Kerja').replace(/^\(\d+\)\s*/, '') };
+  });
+  const requestedNip = employeeId(employee.supervisor.nip) || clean(employee.supervisor.id);
+  const lookup = { attempted: Boolean(requestedNip), nip: requestedNip, name: '', control: 'live-page-fetch', select2: true };
+  if (requestedNip) {
+    try {
+      await page.goto(LLK_BASE, { waitUntil: 'domcontentloaded', timeout: 60000 });
+      const llkMenu = page.locator('a[href="/llk"], a[href="https://llk.mahkamahagung.go.id/llk"]').first();
+      if (!await llkMenu.count()) throw new Error('Menu LLK tidak ditemukan dari dashboard');
+      await llkMenu.click();
+      await page.waitForURL(url => url.origin === LLK_BASE && /\/llk(?:\/|$|\?)/i.test(url.pathname + url.search), { timeout: 15000 }).catch(() => {});
+      await page.waitForLoadState('domcontentloaded').catch(() => {});
+      if (!/^\/llk(?:\/|$)/i.test(new URL(page.url()).pathname)) throw new Error(`Menu LLK tidak membuka daftar LLK: ${page.url()}`);
+      const createLink = page.locator('a[href="https://llk.mahkamahagung.go.id/llk/create"], a[href="/llk/create"]').first();
+      if (!await createLink.count()) throw new Error(`Tombol buat LLK tidak ditemukan: ${page.url()}`);
+      await createLink.click();
+      await page.waitForURL(url => url.origin === LLK_BASE && /^\/llk\/create(?:\/|$|\?)/i.test(url.pathname + url.search), { timeout: 15000 });
+      await page.waitForLoadState('domcontentloaded');
+      if (!await page.locator('#snip, [name="supervisor[nip]"]').count()) throw new Error('Kontrol NIP Pejabat Atasan tidak ditemukan pada form buat LLK');
+      const selected = await resolveLlkSupervisor(page, requestedNip);
+      lookup.name = selected.name;
+      lookup.resultText = selected.resultText;
+      lookup.url = selected.url;
+      lookup.control = selected.control;
+    } catch (error) {
+      lookup.error = clean(error.message).slice(0, 500);
+    }
+  }
+  if (originalUrl && originalUrl !== page.url()) await page.goto(originalUrl, { waitUntil: 'domcontentloaded' }).catch(() => {});
+  const name = clean(profile.name), nip = employeeId(profile.nip), position = clean(profile.position), satker = clean(profile.satker), supervisorName = clean(lookup.name);
+  const updated = {
+    ...employee,
+    name: name.length > 3 ? name : employee.name,
+    nip: nip || employee.nip,
+    position: position.length > 3 ? position : employee.position,
+    satker: satker.length > 3 ? satker : employee.satker,
+    supervisor: { id: requestedNip || employee.supervisor.id, nip: requestedNip || employee.supervisor.nip, name: supervisorName || employee.supervisor.name, verified: Boolean(requestedNip && supervisorName), source: supervisorName ? 'llk-select2' : 'pending-lookup' },
+    accountIdentity: { name, nip, position, satker },
+    supervisorLookup: lookup
+  };
+  const employees = await getEmployees();
+  const index = employees.findIndex(item => item.id === employee.id || item.nip === updated.nip);
+  if (index >= 0) employees.splice(index, 1, updated); else employees.push(updated);
+  await saveJson(employeeFile, employees);
+  return updated;
 }
 
 async function launchExternalBootstrap(satker, supervisorNip, department = 'umum_keuangan') {
@@ -473,36 +545,41 @@ async function launchExternalBootstrap(satker, supervisorNip, department = 'umum
   return {employee,context,tempId};
 }
 
-async function completeExternalBootstrap(tempId,tempEmployee,context) {
-  const page=await requireAuthenticatedLlkPage(context);
-  const verifier=await importVerifier(tempId,context,page);
-  const actualNip=employeeId(verifier.verifier.nip);
-  if(!actualNip)throw new HttpError(401,'NIP akun login SSO tidak terdeteksi');
-  const placeholder={...tempEmployee,id:actualNip,nip:actualNip,name:clean(verifier.verifier.name)||tempEmployee.name};
-  const employees=await getEmployees(),index=employees.findIndex(item=>item.id===actualNip);
-  index>=0?employees.splice(index,1,placeholder):employees.push(placeholder);
-  await saveJson(employeeFile,employees);
-  const enriched=await enrichEmployeeFromSso(placeholder,page);
-  const history=await importPersonal(actualNip,context,page);
-  if(history?.candidate)await saveJson(personalFile(actualNip),history.candidate);
-  await storeSessionCookies(actualNip,await context.cookies());
-  const flow=loginFlows.get(tempId);
-  if(flow){flow.employee=enriched;flow.actualNip=actualNip;flow.fetchedAt=new Date().toISOString();}
-  return {employee:enriched,verifier,history,sessionActive:true,tempId};
+async function completeExternalBootstrap(tempId, tempEmployee, context) {
+  const page = await requireAuthenticatedLlkPage(context);
+  const enrichedDraft = await enrichEmployeeFromSso(tempEmployee, page);
+  const actualNip = employeeId(enrichedDraft.nip);
+  if (!actualNip) throw new HttpError(401, 'NIP akun login SSO tidak terdeteksi dari profil LLK');
+  const enriched = { ...enrichedDraft, id: actualNip, nip: actualNip };
+  const employees = (await getEmployees()).filter(item => item.id !== tempId && item.id !== actualNip);
+  employees.push(enriched);
+  await saveJson(employeeFile, employees);
+  const history = await importPersonal(actualNip, context, page);
+  if (history?.candidate) await saveJson(personalFile(actualNip), history.candidate);
+  await storeSessionCookies(actualNip, await context.cookies());
+  const flow = loginFlows.get(tempId);
+  if (flow) {
+    flow.employee = enriched;
+    flow.actualNip = actualNip;
+    flow.fetchedAt = new Date().toISOString();
+  }
+  return { employee: enriched, verifier: { available: false, warning: null }, history, sessionActive: true, tempId };
 }
 
 function normalizedIdentity(value){return clean(value).toLocaleLowerCase('id-ID');}
 async function completeLogin(id){
-  const flow=loginFlows.get(id); if(!flow||flow.closing)throw new HttpError(409,'Tidak ada proses login aktif');
-  const page=await requireAuthenticatedLlkPage(flow.context),verifier=await importVerifier(id,flow.context,page),actualNip=employeeId(verifier.verifier.nip),expectedNip=employeeId(flow.employee.nip),warnings=[];
-  const employee=await enrichEmployeeFromSso(flow.employee,page);
-  if(verifier.warning)warnings.push(verifier.warning);
-  if(expectedNip){if(actualNip!==expectedNip)throw new HttpError(401,'Identitas akun SSO tidak cocok dengan NIP pegawai terpilih');}
-  else {if(normalizedIdentity(verifier.verifier.name)!==normalizedIdentity(flow.employee.name))throw new HttpError(401,'Identitas akun SSO tidak cocok dengan nama pegawai terpilih');warnings.push('Pegawai Ad-Hoc tanpa NIP dicocokkan berdasarkan nama lengkap persis. Pastikan identitas benar sebelum melanjutkan.');}
-  const history=await importPersonal(id,flow.context,page);if(history.warning)warnings.push(history.warning);
-  await storeSessionCookies(id,await flow.context.cookies());
-  await closeLoginFlow(id,flow);
-  return {active:false,authenticated:true,stage:'complete',identity:verifier.verifier,employee,warning:warnings.join(' ')||null,warnings,verifier,history,autoApplied:false};
+  const flow = loginFlows.get(id); if (!flow || flow.closing) throw new HttpError(409, 'Tidak ada proses login aktif');
+  const page = await requireAuthenticatedLlkPage(flow.context);
+  const employee = await enrichEmployeeFromSso(flow.employee, page);
+  const actualNip = employeeId(employee.nip), expectedNip = employeeId(flow.employee.nip), warnings = [];
+  if (expectedNip && actualNip !== expectedNip) throw new HttpError(401, 'Identitas akun SSO tidak cocok dengan NIP pegawai terpilih');
+  if (!expectedNip && normalizedIdentity(employee.name) !== normalizedIdentity(flow.employee.name)) {
+    throw new HttpError(401, 'Identitas akun SSO tidak cocok dengan nama pegawai terpilih');
+  }
+  const history = await importPersonal(id, flow.context, page); if (history.warning) warnings.push(history.warning);
+  await storeSessionCookies(id, await flow.context.cookies());
+  await closeLoginFlow(id, flow);
+  return { active: false, authenticated: true, stage: 'complete', identity: employee.accountIdentity, employee, warning: warnings.join(' ') || null, warnings, verifier: { available: false, warning: null }, history, autoApplied: false };
 }
 async function verificationTargets(id, context, extractIds = true) {
   progress(id,'launch','Memuat sesi LLK tersimpan di browser headless…');

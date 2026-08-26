@@ -179,7 +179,38 @@ async function openLogin(id) {
     return { active: true, createdAt, expiresAt: flow.expiresAt, message: 'Edge dibuka. Selesaikan login SSO, lalu klik Selesai Login.' };
   } catch (error) { await closeLoginFlow(id); locks.delete(id); throw error; }
 }
-async function generatePreview(employee, start, end, source = 'page', department, pageActivities = []) {
+const SCHEDULE_PATTERNS = {
+  full: { blocks: day => day.dow === 5 ? [['08:00', '17:00']] : [['08:00', '16:30']] },
+  split: { blocks: day => day.dow === 5 ? [['08:00', '12:00'], ['13:30', '17:00']] : [['08:00', '12:00'], ['13:00', '16:30']] }
+};
+function officialSchedule(day, pattern) {
+  return SCHEDULE_PATTERNS[pattern].blocks(day);
+}
+function inferSchedulePattern(day, priorEntries) {
+  const patterns = new Set();
+  const groups = new Map();
+  for (const entry of priorEntries || []) {
+    const key = entry.date || entry.rawDate || '';
+    if (!key) continue;
+    const entries = groups.get(key) || [];
+    entries.push(entry);
+    groups.set(key, entries);
+  }
+  for (const [key, entries] of groups) {
+    const entryDay = /^\d{4}-\d{2}-\d{2}$/.test(key) ? new Date(`${key}T00:00:00`).getDay() : null;
+    if (entryDay !== day.dow) continue;
+    const work = entries.filter(entry => !entry.isBreak).map(entry => [entry.start, entry.end]);
+    const split = officialSchedule(day, 'split'), full = officialSchedule(day, 'full');
+    if (JSON.stringify(work) === JSON.stringify(split)) patterns.add('split');
+    if (JSON.stringify(work) === JSON.stringify(full)) patterns.add('full');
+  }
+  if (patterns.size === 1) return [...patterns][0];
+  const expectedBreakEnd = day.dow === 5 ? '13:30' : '13:00';
+  const hasMatchingBreak = (priorEntries || []).some(entry => entry.isBreak && entry.start === '12:00' && entry.end === expectedBreakEnd);
+  if (hasMatchingBreak) return 'split';
+  throw new HttpError(409, `Pola jadwal ${day.dow === 5 ? 'Jumat' : 'Senin–Kamis'} belum dapat dibaca dari LLK sebelumnya. Pastikan halaman LLK memuat kegiatan dan istirahat dengan jam lengkap.`);
+}
+async function generatePreview(employee, start, end, source = 'page', department, pageActivities = [], priorEntries = []) {
   if (!employee) throw new HttpError(404, 'Pegawai tidak ditemukan');
   const stored = await readJson(templateFile), templates = stored.departments || stored;
   const selectedDepartment = clean(department) || employee.department;
@@ -188,11 +219,23 @@ async function generatePreview(employee, start, end, source = 'page', department
   const activities = useGeneral ? templates[selectedDepartment].activities : pageActivities;
   if (!activities?.length) bad(useGeneral ? 'Template umum bagian ini belum memiliki kegiatan' : 'Halaman pertama LLK belum memiliki kegiatan. Pilih Template umum sebagai sumber alternatif.');
   let index = 0;
-  return (await workdays(start, end)).map(day => { const first = activities[index++ % activities.length], second = activities[index++ % activities.length], friday = day.dow === 5; const item=a=>({description:a.nama||a.description,type:a.kategori||a.type||'Pendukung',result:'Selesai'}); return { date: day.iso, supervisor: employee.supervisor, activitySource:useGeneral?'template-general':'llk-page-1', items: [
-    {...item(first),start:'08:00',end:'12:00'},
-    { start:'12:00', end:friday ? '13:30':'13:00', description:'Istirahat', type:'Pendukung', result:'Selesai' },
-    {...item(second),start:friday?'13:30':'13:00',end:friday?'17:00':'16:30'}
-  ] }; });
+  return (await workdays(start, end)).map(day => {
+    const schedulePattern = inferSchedulePattern(day, priorEntries);
+    const activityItem = (activity, start, end) => ({ description: activity.nama || activity.description, type: activity.kategori || activity.type || 'Pendukung', result: 'Selesai', start, end });
+    let items;
+    if (schedulePattern === 'full') {
+      const [[start, end]] = officialSchedule(day, 'full');
+      items = [activityItem(activities[index++ % activities.length], start, end)];
+    } else {
+      const [[morningStart, morningEnd], [afternoonStart, afternoonEnd]] = officialSchedule(day, 'split');
+      items = [
+        activityItem(activities[index++ % activities.length], morningStart, morningEnd),
+        { start: morningEnd, end: afternoonStart, description: 'Istirahat', type: 'Pendukung', result: 'Selesai' },
+        activityItem(activities[index++ % activities.length], afternoonStart, afternoonEnd)
+      ];
+    }
+    return { date: day.iso, supervisor: employee.supervisor, activitySource: useGeneral ? 'template-general' : 'llk-page-1', schedulePattern, items };
+  });
 }
 function minute(value) { if (!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(value)) bad('Jam kegiatan tidak valid'); const [h,m] = value.split(':').map(Number); return h * 60 + m; }
 async function validatePreview(preview) {
@@ -202,16 +245,19 @@ async function validatePreview(preview) {
     if (!day || typeof day !== 'object' || seen.has(day.date)) bad('Tanggal preview duplikat atau tidak valid'); seen.add(day.date);
     const date = parseDate(day.date), iso = localIso(date), dow = date.getDay();
     if (iso !== day.date || dow === 0 || dow === 6 || holidays.has(iso)) bad(`Tanggal ${day.date} bukan hari kerja`);
-    if (!Array.isArray(day.items) || !day.items.length || day.items.length > 12) bad(`Kegiatan ${day.date} tidak valid`);
-    const close = dow === 5 ? 17 * 60 : 16 * 60 + 30; let cursor = 8 * 60;
+    const allowedPatterns = dow === 5
+      ? [[['08:00', '17:00']], [['08:00', '12:00'], ['12:00', '13:30'], ['13:30', '17:00']]]
+      : [[['08:00', '16:30']], [['08:00', '12:00'], ['12:00', '13:00'], ['13:00', '16:30']]];
     const items = day.items.map((item, itemIndex) => {
       if (!item || typeof item !== 'object') bad(`Baris ${itemIndex + 1} tidak valid`);
       const start = clean(item.start), end = clean(item.end), from = minute(start), to = minute(end);
       const description = clean(item.description), type = clean(item.type), result = clean(item.result);
-      if (from !== cursor || to <= from || !description || description.length > 2000 || !result || result.length > 500 || !['Utama','Pendukung'].includes(type)) bad(`Susunan waktu/kegiatan ${day.date} tidak valid`);
-      cursor = to; return { start, end, description, type, result };
+      if (to <= from || !description || description.length > 2000 || !result || result.length > 500 || !['Utama','Pendukung'].includes(type)) bad(`Susunan waktu/kegiatan ${day.date} tidak valid`);
+      return { start, end, description, type, result };
     });
-    if (cursor !== close) bad(`Kegiatan ${day.date} harus mencakup jam kerja tanpa celah`);
+    const actualBlocks = items.map(item => [item.start, item.end]);
+    if (!allowedPatterns.some(pattern => JSON.stringify(pattern) === JSON.stringify(actualBlocks))) bad(`Jadwal ${day.date} harus memakai pola kerja resmi`);
+    if (items.length === 3 && (items[1].description !== 'Istirahat' || items[1].type !== 'Pendukung')) bad(`Baris tengah ${day.date} harus berupa Istirahat`);
     return { date: iso, items };
   });
 }
@@ -266,21 +312,24 @@ async function scrapeEntries(context, existingPage) {
       const tables = [...document.querySelectorAll('table')];
       const output = [];
       for (const table of tables) {
-        const headers = [...table.querySelectorAll('thead th')].map(cell => cleanText(cell.textContent).toLowerCase());
+        const headerRow = [...table.rows].find(row => [...row.cells].some(cell => /^(?:jam|waktu|kegiatan|uraian|aktivitas|jenis|hasil(?:\/volume)?|output)$/i.test(cleanText(cell.textContent))));
+        if (!headerRow) continue;
+        const headers = [...headerRow.cells].map(cell => cleanText(cell.textContent).toLowerCase());
         const indexFor = pattern => headers.findIndex(header => pattern.test(header));
-        const timeIndex = indexFor(/jam|waktu/), activityIndex = indexFor(/kegiatan|uraian|aktivitas/), typeIndex = indexFor(/jenis/), resultIndex = indexFor(/hasil|output/);
-        for (const row of [...table.querySelectorAll('tbody tr')]) {
+        const timeIndex = indexFor(/^jam$|^waktu$/), activityIndex = indexFor(/^kegiatan$|^uraian$|^aktivitas$/), typeIndex = indexFor(/^jenis$/), resultIndex = indexFor(/^hasil(?:\/volume)?$|^output$/);
+        if (timeIndex < 0 || activityIndex < 0 || typeIndex < 0 || resultIndex < 0) continue;
+        for (const row of [...table.rows].slice(headerRow.rowIndex + 1)) {
           if (row.querySelector('table')) continue;
           const cells = [...row.cells].map(cell => cleanText(cell.textContent));
-          const text = cleanText(cells.join(' '));
-          const times = text.match(/\b(?:[01]\d|2[0-3]):[0-5]\d\b/g) || [];
+          const times = (cells[timeIndex] || '').match(/\b(?:[01]\d|2[0-3]):[0-5]\d\b/g) || [];
           if (times.length < 2) continue;
-          const rawDate = (cleanText(row.closest('table')?.parentElement?.textContent).match(/Tanggal Kegiatan\s*:\s*([^,]+)/i) || text.match(/Tanggal Kegiatan\s*:\s*([^,]+)/i) || [])[1] || '';
-          const description = cells[activityIndex] || cells.find(cell => cell && !/^(?:\d+|(?:[01]\d|2[0-3]):[0-5]\d(?:\s*[-–]\s*(?:[01]\d|2[0-3]):[0-5]\d)?|Utama|Pendukung|Selesai)$/i.test(cell)) || '';
-          if (!description || /^istirahat$/i.test(description) || /^(?:no|jam|waktu|kegiatan|jenis|hasil)$/i.test(description)) continue;
-          const type = /^(Utama|Pendukung)$/i.test(cells[typeIndex]) ? cells[typeIndex] : (cells.find(cell => /^(Utama|Pendukung)$/i.test(cell)) || 'Pendukung');
-          const result = cells[resultIndex] || cells.find(cell => /^Selesai$/i.test(cell)) || 'Selesai';
-          output.push({ rawDate, start: times[0], end: times.at(-1), description, type, result });
+          const description = cleanText(cells[activityIndex]);
+          if (!description) continue;
+          const rowText = cleanText(cells.join(' '));
+          const rawDate = (cleanText(table.parentElement?.textContent).match(/Tanggal Kegiatan\s*:\s*([^,]+)/i) || rowText.match(/Tanggal Kegiatan\s*:\s*([^,]+)/i) || [])[1] || '';
+          const type = /^(Utama|Pendukung)$/i.test(cells[typeIndex]) ? cells[typeIndex] : 'Pendukung';
+          const result = cells[resultIndex] || 'Selesai';
+          output.push({ rawDate, start: times[0], end: times[1], description, type, result, isBreak: /^istirahat$/i.test(description) });
         }
       }
       return output;
@@ -331,10 +380,9 @@ async function submitPreview(id, rawPreview, policy) {
       }
       const result={date:day.date,state:'failed',status:'failed',statusLabel:'Gagal dikirim',submitted:false,skipped:false,failed:true,verified:false,itemCount:day.items.length,payload:{date:day.date,items:day.items}};
       try {
-        await page.goto(`${LLK_BASE}/profile`,{waitUntil:'domcontentloaded',timeout:60000});
+        await openLlkCreateForm(page);
         const token = await extractCsrfToken(page, context);
-        await page.goto(`${LLK_BASE}/llk/create`,{waitUntil:'domcontentloaded',timeout:60000});
-        const selectedSupervisor=await resolveLlkSupervisor(page,employeeId(employee.supervisor.nip)||employee.supervisor.id);
+        const selectedSupervisor = await resolveLlkSupervisor(page, employeeId(employee.supervisor.nip) || employee.supervisor.id);
         const liveSupervisor={id:selectedSupervisor.id,nip:selectedSupervisor.nip,name:selectedSupervisor.name,fields:{nip:'live-page-fetch',name:'live-page-fetch'}};
         if(!employeeId(liveSupervisor.nip)||!liveSupervisor.name)throw new Error('Lookup atasan tidak lengkap. Pengiriman dibatalkan.');
         const employees=await getEmployees(),employeeIndex=employees.findIndex(item=>item.id===employee.id);
@@ -442,6 +490,22 @@ async function importPersonal(id, existingContext, existingPage) {
   } finally { if (owned) await context.close(); }
 }
 
+async function openLlkCreateForm(page) {
+  await page.goto(LLK_BASE, { waitUntil: 'domcontentloaded', timeout: 60000 });
+  const llkMenu = page.locator('a[href="/llk"], a[href="https://llk.mahkamahagung.go.id/llk"]').first();
+  if (!await llkMenu.count()) throw new Error('Menu LLK tidak ditemukan dari dashboard');
+  await llkMenu.click();
+  await page.waitForURL(url => url.origin === LLK_BASE && /\/llk(?:\/|$|\?)/i.test(url.pathname + url.search), { timeout: 15000 }).catch(() => {});
+  await page.waitForLoadState('domcontentloaded').catch(() => {});
+  if (!/^\/llk(?:\/|$)/i.test(new URL(page.url()).pathname)) throw new Error(`Menu LLK tidak membuka daftar LLK: ${page.url()}`);
+  const createLink = page.locator('a[href="https://llk.mahkamahagung.go.id/llk/create"], a[href="/llk/create"]').first();
+  if (!await createLink.count()) throw new Error(`Tombol buat LLK tidak ditemukan: ${page.url()}`);
+  await createLink.click();
+  await page.waitForURL(url => url.origin === LLK_BASE && /^\/llk\/create(?:\/|$|\?)/i.test(url.pathname + url.search), { timeout: 15000 });
+  await page.waitForLoadState('domcontentloaded');
+  if (!await page.locator('#snip, [name="supervisor[nip]"]').count()) throw new Error('Kontrol NIP Pejabat Atasan tidak ditemukan pada form buat LLK');
+}
+
 async function resolveLlkSupervisor(page, nip) {
   const binding = await page.evaluate(() => {
     const normalize = value => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
@@ -494,19 +558,7 @@ async function enrichEmployeeFromSso(employee, page) {
   const lookup = { attempted: Boolean(requestedNip), nip: requestedNip, name: '', control: 'live-page-fetch', select2: true };
   if (requestedNip) {
     try {
-      await page.goto(LLK_BASE, { waitUntil: 'domcontentloaded', timeout: 60000 });
-      const llkMenu = page.locator('a[href="/llk"], a[href="https://llk.mahkamahagung.go.id/llk"]').first();
-      if (!await llkMenu.count()) throw new Error('Menu LLK tidak ditemukan dari dashboard');
-      await llkMenu.click();
-      await page.waitForURL(url => url.origin === LLK_BASE && /\/llk(?:\/|$|\?)/i.test(url.pathname + url.search), { timeout: 15000 }).catch(() => {});
-      await page.waitForLoadState('domcontentloaded').catch(() => {});
-      if (!/^\/llk(?:\/|$)/i.test(new URL(page.url()).pathname)) throw new Error(`Menu LLK tidak membuka daftar LLK: ${page.url()}`);
-      const createLink = page.locator('a[href="https://llk.mahkamahagung.go.id/llk/create"], a[href="/llk/create"]').first();
-      if (!await createLink.count()) throw new Error(`Tombol buat LLK tidak ditemukan: ${page.url()}`);
-      await createLink.click();
-      await page.waitForURL(url => url.origin === LLK_BASE && /^\/llk\/create(?:\/|$|\?)/i.test(url.pathname + url.search), { timeout: 15000 });
-      await page.waitForLoadState('domcontentloaded');
-      if (!await page.locator('#snip, [name="supervisor[nip]"]').count()) throw new Error('Kontrol NIP Pejabat Atasan tidak ditemukan pada form buat LLK');
+      await openLlkCreateForm(page);
       const selected = await resolveLlkSupervisor(page, requestedNip);
       lookup.name = selected.name;
       lookup.resultText = selected.resultText;
@@ -798,15 +850,44 @@ async function api(req,res,url) {
   const id = safeId(decodeURIComponent(employeeRoute[1]));
   const action = employeeRoute[2];
   if(action==='personal-template'&&req.method==='GET')return json(res,200,await personalResponse(await findEmployee(id)));
-  if(action==='preview'&&req.method==='POST'){const input=await bodyJson(req);return json(res,200,await withLock(id,async()=>{const employee=await findEmployee(id),{context}=await launchEmployee(id);try{const source=input.source==='general'?'general':'page';progress(id,'preview-start',`Menyiapkan isian ${input.start} sampai ${input.end}…`);const page=context.pages()[0]??await context.newPage();let pageActivities=[];if(source==='page'){progress(id,'preview-llk','Membaca seluruh kegiatan unik pada halaman pertama LLK…');const entries=await scrapeEntries(context,page);pageActivities=[...new Map(entries.map(item=>[canonical({description:item.description,type:item.type}),item])).values()];progress(id,'preview-llk-done',`Halaman pertama LLK terbaca: ${entries.length||0} entri, ${pageActivities.length} kegiatan unik.`);}let enriched=employee;if(!employee.supervisor?.verified||!employee.satker||employee.satker==='Satker Lain'){progress(id,'preview-profile','Mengambil profil akun, satker, dan nama atasan dari LLK…');enriched=await enrichEmployeeFromSso(employee,page);}else{progress(id,'preview-profile-skip','Profil dan atasan sudah terverifikasi; melewati pengecekan ulang.');}progress(id,'preview-build',source==='general'?'Menyusun pratinjau dari template umum…':'Menyusun pratinjau dari halaman pertama LLK…');const preview=await generatePreview(enriched,input.start,input.end,source,input.department,pageActivities);progress(id,'preview-done',`Pratinjau siap: ${preview.length} hari kerja.`,{days:preview.length,source:source==='general'?'template-general':'llk-page-1'});return preview;}finally{await context.close();}}));}
-  if(action==='personal-template/apply'&&req.method==='POST')return json(res,200,await applyPersonal(id,await bodyJson(req)));
-  if(action==='personal-template'&&req.method==='DELETE')return json(res,200,await resetPersonal(id,await bodyJson(req)));
-  if(action==='login/status'&&req.method==='GET'){const flow=loginFlows.get(id); if(!flow||flow.closing)return json(res,200,{active:false}); const pages=await pageDiagnostics(flow.context), authenticated=Boolean(authenticatedLlkPage(flow.context)); return json(res,200,{active:true,authenticated,createdAt:flow.createdAt,expiresAt:flow.expiresAt,pages});}
-  if(action==='login/complete'&&req.method==='POST')return json(res,200,await completeLogin(id));
-  if(action==='login/cancel'&&req.method==='POST')return json(res,200,{active:false,cancelled:await closeLoginFlow(id)});
-  if(action==='login'&&req.method==='POST')return json(res,200,await openLogin(id));
-  if(action==='personal-template/import'&&req.method==='POST')return json(res,200,await withLock(id,()=>importPersonal(id)));
-  if(action==='submit'&&req.method==='POST'){const input=await bodyJson(req);const report=await withLock(id,()=>submitPreview(id,input.preview,input.duplicatePolicy));await audit('submit',id,input.preview,{counts:{submitted:report.success,failed:report.failed},result:'completed'});return json(res,200,sanitize(report));}
+  if (action === 'preview' && req.method === 'POST') {
+    const input = await bodyJson(req);
+    return json(res, 200, await withLock(id, async () => {
+      const employee = await findEmployee(id), { context } = await launchEmployee(id);
+      try {
+        const source = input.source === 'general' ? 'general' : 'page';
+        progress(id, 'preview-start', `Menyiapkan isian ${input.start} sampai ${input.end}…`);
+        const page = context.pages()[0] ?? await context.newPage();
+        progress(id, 'preview-llk', 'Membaca pola jadwal dan kegiatan LLK sebelumnya…');
+        const entries = await scrapeEntries(context, page);
+        const pageActivities = source === 'page'
+          ? [...new Map(entries.filter(entry => !entry.isBreak).map(item => [canonical({ description: item.description, type: item.type }), item])).values()]
+          : [];
+        progress(id, 'preview-llk-done', `LLK sebelumnya terbaca: ${entries.length} baris.`);
+        return generatePreview(employee, input.start, input.end, source, input.department, pageActivities, entries);
+      } finally {
+        await context.close();
+      }
+    }));
+  }
+  if (action === 'personal-template/apply' && req.method === 'POST') return json(res, 200, await applyPersonal(id, await bodyJson(req)));
+  if (action === 'personal-template' && req.method === 'DELETE') return json(res, 200, await resetPersonal(id, await bodyJson(req)));
+  if (action === 'login/status' && req.method === 'GET') {
+    const flow = loginFlows.get(id);
+    if (!flow || flow.closing) return json(res, 200, { active: false });
+    const pages = await pageDiagnostics(flow.context), authenticated = Boolean(authenticatedLlkPage(flow.context));
+    return json(res, 200, { active: true, authenticated, createdAt: flow.createdAt, expiresAt: flow.expiresAt, pages });
+  }
+  if (action === 'login/complete' && req.method === 'POST') return json(res, 200, await completeLogin(id));
+  if (action === 'login/cancel' && req.method === 'POST') return json(res, 200, { active: false, cancelled: await closeLoginFlow(id) });
+  if (action === 'login' && req.method === 'POST') return json(res, 200, await openLogin(id));
+  if (action === 'personal-template/import' && req.method === 'POST') return json(res, 200, await withLock(id, () => importPersonal(id)));
+  if (action === 'submit' && req.method === 'POST') {
+    const input = await bodyJson(req);
+    const report = await withLock(id, () => submitPreview(id, input.preview, input.duplicatePolicy));
+    await audit('submit', id, input.preview, { counts: { submitted: report.success, failed: report.failed }, result: 'completed' });
+    return json(res, 200, sanitize(report));
+  }
   return json(res,405,{error:'Metode tidak didukung'});
 }
 

@@ -186,7 +186,10 @@ async function loadApp() {
     setNewProfileMode(true);
     $('#quickSsoLoginBtn').hidden = true;
     $('#quickSsoFetchBtn').hidden = false;
-    feedback(pendingBootstrap.fetchedAt ? 'Sesi Edge tetap aktif. Klik Saya sudah login untuk mengambil ulang daftar LLK.' : 'Sesi login Edge masih aktif. Selesaikan login lalu klik Saya sudah login.');
+    $('#quickSsoRestartBtn').hidden = false;
+    feedback(pendingBootstrap.authenticated
+      ? 'Sesi Edge sudah login. Klik Saya sudah login untuk mengambil profil dan daftar LLK.'
+      : 'Sesi Edge belum login atau sudah berakhir. Klik Buka ulang SSO, selesaikan login, lalu klik Saya sudah login.');
   }
 }
 function renderLoginFlow() {
@@ -371,28 +374,25 @@ function minutes(time) {
   return (hours || 0) * 60 + (mins || 0);
 }
 
+function matchesOfficialSchedule(day) {
+  const friday = new Date(`${day.date}T00:00:00`).getDay() === 5;
+  const allowed = friday
+    ? [[['08:00', '17:00']], [['08:00', '12:00'], ['12:00', '13:30'], ['13:30', '17:00']]]
+    : [[['08:00', '16:30']], [['08:00', '12:00'], ['12:00', '13:00'], ['13:00', '16:30']]];
+  const timesMatch = allowed.some(pattern => pattern.length === day.items.length && pattern.every(([start, end], index) => day.items[index].start === start && day.items[index].end === end));
+  return timesMatch && (day.items.length === 1 || (day.items[1].description === 'Istirahat' && day.items[1].type === 'Pendukung'));
+}
 function validatePreview(preview) {
   const errors = [];
   preview.forEach(day => {
-    let previousEnd = null;
     day.items.forEach((item, index) => {
       const label = `${day.date}, baris ${index + 1}`;
-      if (!/^\d{2}:\d{2}$/.test(item.start) || !/^\d{2}:\d{2}$/.test(item.end) || minutes(item.start) >= minutes(item.end)) {
-        errors.push(`${label}: rentang waktu tidak valid.`);
-      }
-      if (previousEnd !== null && minutes(item.start) !== previousEnd) {
-        errors.push(`${label}: waktu harus berurutan.`);
-      }
-      if (!item.description.trim() || !item.result.trim()) {
-        errors.push(`${label}: kegiatan dan hasil wajib diisi.`);
-      }
-      if (!['Utama', 'Pendukung'].includes(item.type)) {
-        errors.push(`${label}: jenis tidak valid.`);
-      }
-      previousEnd = minutes(item.end);
+      if (!/^\d{2}:\d{2}$/.test(item.start) || !/^\d{2}:\d{2}$/.test(item.end) || minutes(item.start) >= minutes(item.end)) errors.push(`${label}: rentang waktu tidak valid.`);
+      if (!item.description.trim() || !item.result.trim()) errors.push(`${label}: kegiatan dan hasil wajib diisi.`);
+      if (!['Utama', 'Pendukung'].includes(item.type)) errors.push(`${label}: jenis tidak valid.`);
     });
+    if (!matchesOfficialSchedule(day)) errors.push(`${day.date}: gunakan pola jam kerja resmi; pola terpisah wajib memuat baris Istirahat.`);
   });
-
   const feedbackNode = $('#previewFeedback');
   if (feedbackNode) {
     feedbackNode.hidden = !errors.length;
@@ -436,11 +436,10 @@ function updatePreviewStatuses(preview, report = null) {
     let label = result ? (result.statusLabel || { verified:'Tersimpan di LLK', saved:'Tersimpan di LLK', skipped:'Sudah ada di LLK', failed:'Gagal' }[state] || state) : 'Siap';
     if (!result) {
       const dayErrors = [];
-      let previousEnd = null;
       day.items.forEach(item => {
-        if (!/^\d{2}:\d{2}$/.test(item.start) || !/^\d{2}:\d{2}$/.test(item.end) || minutes(item.start) >= minutes(item.end) || (previousEnd !== null && minutes(item.start) !== previousEnd) || !item.description.trim() || !item.result.trim() || !['Utama','Pendukung'].includes(item.type)) dayErrors.push(true);
-        previousEnd = minutes(item.end);
+        if (!/^\d{2}:\d{2}$/.test(item.start) || !/^\d{2}:\d{2}$/.test(item.end) || minutes(item.start) >= minutes(item.end) || !item.description.trim() || !item.result.trim() || !['Utama','Pendukung'].includes(item.type)) dayErrors.push(true);
       });
+      if (!matchesOfficialSchedule(day)) dayErrors.push(true);
       if (dayErrors.length) { state = 'failed'; label = 'Perlu diperbaiki'; }
     }
     const badge = document.querySelector(`[data-day-status="${dayIndex}"]`);
@@ -736,8 +735,12 @@ function verificationList(items, state = 'ready') {
   return `<ol class="verification-list">${items.map((item, index) => {
     const ready = state === 'ready' ? item.valid !== false : item.success;
     const label = state === 'ready' ? (ready ? 'Siap' : 'Ditahan') : (ready ? 'Berhasil' : 'Gagal');
-    const detail = state === 'ready' ? (item.issues?.join('; ') || item.summary) : (item.error || (ready ? 'Berhasil diproses.' : `HTTP ${item.status || '—'}`));
-    return `<li class="verification-item verification-item--${ready ? 'ready' : 'failed'}"><span class="verification-number">${index + 1}</span><div class="verification-item-body"><div class="verification-item-head"><strong>${escapeHtml(item.date || item.hllk || 'Target tanpa tanggal')}</strong><span class="verification-status">${label}</span></div>${state === 'ready' && item.hllk ? `<code class="verification-id">ID LLK ${escapeHtml(item.hllk)}</code>` : ''}<p>${escapeHtml(detail || 'Rincian LLK tidak tersedia.')}</p></div></li>`;
+    const fallback = state === 'ready' ? (item.issues?.join('; ') || item.summary) : (item.error || (ready ? 'Berhasil diproses.' : `HTTP ${item.status || '—'}`));
+    const summary = String(item.summary || '');
+    const employee = String(item.employeeName || (summary.match(/^\s*\d+\s+(.+?),\s*Tanggal Kegiatan\s*:/i) || [])[1] || '').trim();
+    const activities = Array.isArray(item.activities) ? item.activities.filter(activity => activity.start || activity.end || activity.description) : [];
+    const schedule = activities.length ? `<ul class="verification-schedule">${activities.map(activity => `<li><time>${escapeHtml(`${activity.start || '—'}–${activity.end || '—'}`)}</time><span>${escapeHtml(activity.description || 'Kegiatan tidak terbaca')}</span><small>${escapeHtml(activity.type || '')}</small></li>`).join('')}</ul>` : `<p class="verification-detail">${escapeHtml(fallback || 'Rincian LLK tidak tersedia.')}</p>`;
+    return `<li class="verification-item verification-item--${ready ? 'ready' : 'failed'}"><span class="verification-number">${index + 1}</span><div class="verification-item-body"><div class="verification-item-head"><div><strong>${escapeHtml(item.date || item.hllk || 'Target tanpa tanggal')}</strong>${employee ? `<span class="verification-employee">${escapeHtml(employee)}</span>` : ''}</div><span class="verification-status">${label}</span></div>${state === 'ready' && item.hllk ? `<code class="verification-id">ID LLK ${escapeHtml(item.hllk)}</code>` : ''}${schedule}</div></li>`;
   }).join('')}</ol>`;
 }
 function verificationRecovery(error) {
@@ -782,28 +785,34 @@ $('#runWizardVerificationBtn')?.addEventListener('click', () => active && runBus
   $('#wizardVerificationPreview').innerHTML=`<p class="verification-result-summary"><strong>Verifikasi selesai tanpa memindai ulang filter.</strong></p>${verificationList(result.results, 'result')}`;
   $('#runWizardVerificationBtn').disabled=true;
 }, 'Verifikasi LLK Anggota'));
-
-
 async function fetchBootstrapProfile() {
-  if (!bootstrapFlow) throw new Error('Sesi bootstrap tidak aktif. Klik Tambah profil untuk menghubungkan sesi Edge yang masih login.');
-  const out = await api('/api/bootstrap/complete', {
-    method: 'POST',
-    body: JSON.stringify({ tempId: bootstrapFlow, supervisorNip: String($('#quickSupervisorNip')?.value || '').trim() })
-  });
-  sessionStorage.removeItem('bootstrapFlow');
-  bootstrapFlow = null;
-  setNewProfileMode(false);
-  selectEmployee(out.employee);
-  loginFlows.set(out.employee.id, 'review');
-  const loginBadge = $('#loginBadge');
-  if (loginBadge) loginBadge.textContent = 'SSO aktif';
-  const loginNextBtn = $('#loginNextBtn');
-  if (loginNextBtn) loginNextBtn.hidden = false;
-  setWizardStep(2);
-  await loadEmployees();
-  const templateCount = out.history?.candidate?.activities?.length || out.history?.activities?.length || 0;
-  log(`Profil ${out.employee.name} (${out.employee.nip}) dibuat dari SSO; ${templateCount} pola kegiatan diimpor. Edge tetap terbuka.`);
-  feedback(`Sesi Edge tetap aktif. ${templateCount} pola kegiatan ditemukan; klik Saya sudah login untuk mengambil ulang.`);
+  if (!bootstrapFlow) throw new Error('Sesi bootstrap tidak aktif. Klik Buka ulang SSO untuk membuat sesi login baru.');
+  try {
+    const out = await api('/api/bootstrap/complete', {
+      method: 'POST',
+      body: JSON.stringify({ tempId: bootstrapFlow, supervisorNip: String($('#quickSupervisorNip')?.value || '').trim() })
+    });
+    sessionStorage.removeItem('bootstrapFlow');
+    bootstrapFlow = null;
+    setNewProfileMode(false);
+    selectEmployee(out.employee);
+    loginFlows.set(out.employee.id, 'review');
+    const loginBadge = $('#loginBadge');
+    if (loginBadge) loginBadge.textContent = 'SSO aktif';
+    const loginNextBtn = $('#loginNextBtn');
+    if (loginNextBtn) loginNextBtn.hidden = false;
+    setWizardStep(2);
+    await loadEmployees();
+    const templateCount = out.history?.candidate?.activities?.length || out.history?.activities?.length || 0;
+    log(`Profil ${out.employee.name} (${out.employee.nip}) dibuat dari SSO; ${templateCount} pola kegiatan diimpor.`);
+    feedback(`SSO aktif. ${templateCount} pola kegiatan ditemukan.`);
+  } catch (error) {
+    if (error?.status === 401 || /Login LLK belum terdeteksi|kedaluwarsa|Sesi LLK tidak ditemukan/i.test(error?.message || '')) {
+      $('#quickSsoRestartBtn').hidden = false;
+      feedback('Login SSO belum selesai atau sesi telah berakhir. Klik Buka ulang SSO, login di Edge, lalu klik Saya sudah login.', true);
+    }
+    throw error;
+  }
 }
 
 
@@ -825,9 +834,20 @@ $('#employeeForm')?.addEventListener('submit', event => {
     sessionStorage.setItem('bootstrapFlow', bootstrapFlow);
     $('#quickSsoLoginBtn').hidden = true;
     $('#quickSsoFetchBtn').hidden = false;
+    $('#quickSsoRestartBtn').hidden = false;
     log(res.message || 'Silakan selesaikan login SSO di Edge.');
     feedback('Selesaikan login SSO di Edge, lalu klik Saya sudah login. Profil dan kegiatan pada halaman pertama /llk akan dibaca otomatis.');
   }, 'Tambah Profil dari SSO');
+});
+
+$('#quickSsoRestartBtn')?.addEventListener('click', () => {
+  bootstrapFlow = null;
+  sessionStorage.removeItem('bootstrapFlow');
+  $('#quickSsoRestartBtn').hidden = true;
+  $('#quickSsoFetchBtn').hidden = true;
+  $('#quickSsoLoginBtn').hidden = false;
+  $('#quickSupervisorNip')?.focus();
+  feedback('Masukkan NIP atasan jika perlu, lalu klik Login SSO & buat profil untuk membuka sesi Edge baru.');
 });
 
 $('#quickSsoFetchBtn')?.addEventListener('click', () => runBusy(fetchBootstrapProfile, 'Tarik Data Akun'));
@@ -1029,7 +1049,7 @@ $('#previewBtn')?.addEventListener('click', () => active && runBusy(async () => 
   if (!start || !end) throw new Error('Tentukan tanggal mulai dan selesai.');
   const source = document.querySelector('[name="activitySource"]:checked')?.value || 'page';
   const department = source === 'general' ? $('#sourceDepartmentSelect')?.value : undefined;
-  log(`Menyiapkan isian LLK dari ${start} sampai ${end}; sumber: ${source==='general'?'template umum':'halaman terakhir LLK'}…`);
+  log(`Menyiapkan isian LLK dari ${start} sampai ${end}; pola jam kerja dibaca dari LLK sebelumnya; sumber: ${source === 'general' ? 'template umum' : 'halaman terakhir LLK'}…`);
   const preview = await api(`/api/employees/${active.id}/preview`, {
     method: 'POST',
     body: JSON.stringify({ start, end, source, department })
@@ -1080,13 +1100,17 @@ document.addEventListener('DOMContentLoaded', () => {
     root.setAttribute('data-theme', theme);
     try { localStorage.setItem(STORAGE_KEY, theme); } catch (e) { /* private mode */ }
     if (meta) meta.setAttribute('content', META_COLORS[theme]);
+    if (btn) {
+      const nextLabel = theme === 'dark' ? 'Aktifkan mode terang' : 'Aktifkan mode gelap';
+      btn.setAttribute('aria-label', nextLabel);
+      btn.setAttribute('title', nextLabel);
+      btn.setAttribute('aria-pressed', String(theme === 'dark'));
+    }
   }
-
-  // Sync browser chrome color with the pre-paint theme on load.
-  if (meta) meta.setAttribute('content', META_COLORS[currentTheme]);
 
   const btn = document.getElementById('themeToggleBtn');
   if (!btn) return;
+  applyTheme(currentTheme);
 
   btn.addEventListener('click', function () {
     applyTheme(currentTheme === 'dark' ? 'light' : 'dark');

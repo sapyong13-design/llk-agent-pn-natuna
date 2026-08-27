@@ -372,7 +372,15 @@ async function submitPreview(id, rawPreview, policy) {
       await saveJson(reportFile(id),report);
       throw new HttpError(409,`Tanggal sudah ada di LLK: ${duplicateDates.join(', ')}. Tidak ada tanggal yang dikirim.`);
     }
-    const page=await context.newPage();
+    const page = await context.newPage();
+    await openLlkCreateForm(page);
+    const token = await extractCsrfToken(page, context);
+    const selectedSupervisor = await resolveLlkSupervisor(page, employeeId(employee.supervisor.nip) || employee.supervisor.id);
+    const liveSupervisor = { id: selectedSupervisor.id, nip: selectedSupervisor.nip, name: selectedSupervisor.name, fields: { nip: 'live-page-fetch', name: 'live-page-fetch' } };
+    if (!employeeId(liveSupervisor.nip) || !liveSupervisor.id || !liveSupervisor.name) throw new Error('Lookup atasan tidak lengkap. Pengiriman dibatalkan.');
+    const employees = await getEmployees(), employeeIndex = employees.findIndex(item => item.id === employee.id);
+    employee.supervisor = { id: liveSupervisor.id, nip: liveSupervisor.nip, name: liveSupervisor.name, verified: true, source: 'llk-select2' };
+    if (employeeIndex >= 0) { employees.splice(employeeIndex, 1, employee); await saveJson(employeeFile, employees); }
     for (const day of preview) {
       if (existingDates.has(day.date)) {
         report.results.push({date:day.date,state:'skipped',status:'duplicate',statusLabel:'Sudah ada di LLK',message:'Dilewati karena tanggal sudah memiliki LLK di halaman pertama',submitted:false,skipped:true,failed:false,verified:true,itemCount:day.items.length});
@@ -380,14 +388,6 @@ async function submitPreview(id, rawPreview, policy) {
       }
       const result={date:day.date,state:'failed',status:'failed',statusLabel:'Gagal dikirim',submitted:false,skipped:false,failed:true,verified:false,itemCount:day.items.length,payload:{date:day.date,items:day.items}};
       try {
-        await openLlkCreateForm(page);
-        const token = await extractCsrfToken(page, context);
-        const selectedSupervisor = await resolveLlkSupervisor(page, employeeId(employee.supervisor.nip) || employee.supervisor.id);
-        const liveSupervisor={id:selectedSupervisor.id,nip:selectedSupervisor.nip,name:selectedSupervisor.name,fields:{nip:'live-page-fetch',name:'live-page-fetch'}};
-        if(!employeeId(liveSupervisor.nip)||!liveSupervisor.name)throw new Error('Lookup atasan tidak lengkap. Pengiriman dibatalkan.');
-        const employees=await getEmployees(),employeeIndex=employees.findIndex(item=>item.id===employee.id);
-        employee.supervisor={id:liveSupervisor.id,nip:liveSupervisor.nip,name:liveSupervisor.name};
-        if(employeeIndex>=0){employees.splice(employeeIndex,1,employee);await saveJson(employeeFile,employees);}
         const [year,month,date]=day.date.split('-');
         const payload=new URLSearchParams({redirect:`${LLK_BASE}/llk`,_token:token,'author[name]':employee.name,'author[nip]':employee.nip,'author[jabatan_text]':employee.position,'supervisor[nip]':liveSupervisor.id,'supervisor[name]':liveSupervisor.name,activity_date:`${date}-${month}-${year}`});
         for (const item of day.items) { payload.append('items[start_time][]',item.start); payload.append('items[end_time][]',item.end); payload.append('items[description][]',item.description); payload.append('items[type][]',item.type==='Utama'?'primary':'support'); payload.append('items[result][]',item.result); payload.append('items[note][]',''); payload.append('items[id][]',''); }
@@ -883,6 +883,18 @@ async function api(req,res,url) {
   if (action === 'login/cancel' && req.method === 'POST') return json(res, 200, { active: false, cancelled: await closeLoginFlow(id) });
   if (action === 'login' && req.method === 'POST') return json(res, 200, await openLogin(id));
   if (action === 'personal-template/import' && req.method === 'POST') return json(res, 200, await withLock(id, () => importPersonal(id)));
+  if (action === 'session/status' && req.method === 'GET') {
+    const flow = loginFlows.get(id);
+    if (flow && !flow.closing) return json(res, 200, { authenticated: Boolean(authenticatedLlkPage(flow.context)), source: 'active-login' });
+    const { context } = await launchEmployee(id, true);
+    try {
+      const page = context.pages()[0] ?? await context.newPage();
+      await page.goto(LLK_BASE, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+      return json(res, 200, { authenticated: llkLocation(page.url()).authenticated, source: 'saved-session' });
+    } finally {
+      await context.close();
+    }
+  }
   if (action === 'submit' && req.method === 'POST') {
     const input = await bodyJson(req);
     const report = await withLock(id, () => submitPreview(id, input.preview, input.duplicatePolicy));

@@ -339,7 +339,16 @@ function selectEmployee(employee) {
   if (activeNameNode) activeNameNode.textContent = `${employee.name} (${employee.nip || employee.id})`;
 
   const loginBadge = $('#loginBadge');
-  if (loginBadge) loginBadge.textContent = 'Belum masuk';
+  if (loginBadge) loginBadge.textContent = loginFlows.get(employee.id) === 'review' ? 'Logged in' : 'Memeriksa sesi…';
+  api(`/api/employees/${employee.id}/session/status`).then(status => {
+    if (active?.id !== employee.id) return;
+    if (status.authenticated) loginFlows.set(employee.id, 'review');
+    else if (loginFlows.get(employee.id) === 'review') loginFlows.delete(employee.id);
+    if (loginBadge) loginBadge.textContent = status.authenticated ? 'Logged in' : 'Belum masuk';
+    renderLoginFlow();
+  }).catch(() => {
+    if (active?.id === employee.id && loginBadge) loginBadge.textContent = 'Status sesi tidak tersedia';
+  });
 
 
   const previewArea = $('#previewArea');
@@ -795,10 +804,10 @@ async function fetchBootstrapProfile() {
     sessionStorage.removeItem('bootstrapFlow');
     bootstrapFlow = null;
     setNewProfileMode(false);
-    selectEmployee(out.employee);
     loginFlows.set(out.employee.id, 'review');
+    selectEmployee(out.employee);
     const loginBadge = $('#loginBadge');
-    if (loginBadge) loginBadge.textContent = 'SSO aktif';
+    if (loginBadge) loginBadge.textContent = 'Logged in';
     const loginNextBtn = $('#loginNextBtn');
     if (loginNextBtn) loginNextBtn.hidden = false;
     setWizardStep(2);

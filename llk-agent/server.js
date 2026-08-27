@@ -372,6 +372,14 @@ async function submitPreview(id, rawPreview, policy) {
       await saveJson(reportFile(id),report);
       throw new HttpError(409,`Tanggal sudah ada di LLK: ${duplicateDates.join(', ')}. Tidak ada tanggal yang dikirim.`);
     }
+    if (preview.every(day => existingDates.has(day.date))) {
+      report.results = preview.map(day => ({ date: day.date, state: 'skipped', status: 'duplicate', statusLabel: 'Sudah ada di LLK', message: 'Dilewati karena tanggal sudah memiliki LLK pada halaman pertama', submitted: false, skipped: true, failed: false, verified: true, itemCount: day.items.length }));
+      report.success = 0;
+      report.skipped = report.results.length;
+      report.failed = 0;
+      await saveJson(reportFile(id), report);
+      return report;
+    }
     const page = await context.newPage();
     await openLlkCreateForm(page);
     const token = await extractCsrfToken(page, context);
@@ -412,34 +420,13 @@ async function submitPreview(id, rawPreview, policy) {
         result.statusLabel = 'Gagal koneksi';
       }
       report.results.push(result);
-      await saveJson(reportFile(id),report);
+      await saveJson(reportFile(id), report);
       if (result.failed) break;
-      await new Promise(r=>setTimeout(r, 600));
     }
-    try {
-      const after = new Set((await scrapeEntries(context)).map(entryKey));
-      for (const result of report.results) {
-        if (result.submitted && result.payload?.items) {
-          const verified = result.payload.items.every(item=>after.has(entryKey({...item,date:result.date})));
-          result.verified = verified;
-          if (verified) {
-            result.state = 'verified';
-            result.status = 'awaiting_supervisor';
-            result.statusLabel = 'Tersimpan di LLK · Menunggu verifikasi';
-            result.message = `${result.itemCount || result.payload.items.length} kegiatan tersimpan di LLK (menunggu verifikasi atasan)`;
-          } else {
-            result.state = 'saved';
-            result.status = 'awaiting_supervisor';
-            result.statusLabel = 'Tersimpan (sinkronisasi LLK sedang berjalan)';
-            result.message = 'Data terkirim (respons 303); sinkronisasi riwayat mungkin butuh beberapa detik';
-          }
-        }
-      }
-    } catch {}
-    report.success=report.results.filter(x=>(x.submitted || x.verified)&&!x.skipped).length;
-    report.skipped=report.results.filter(x=>x.skipped).length;
-    report.failed=report.results.filter(x=>x.failed).length;
-    await saveJson(reportFile(id),report);
+    report.success = report.results.filter(item => item.submitted && !item.skipped).length;
+    report.skipped = report.results.filter(item => item.skipped).length;
+    report.failed = report.results.filter(item => item.failed).length;
+    await saveJson(reportFile(id), report);
     return report;
   } finally { await context.close(); }
 }

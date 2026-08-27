@@ -1119,10 +1119,13 @@ document.addEventListener('DOMContentLoaded', () => {
     try { localStorage.setItem(STORAGE_KEY, theme); } catch (e) { /* private mode */ }
     if (meta) meta.setAttribute('content', META_COLORS[theme]);
     if (btn) {
-      const nextLabel = theme === 'dark' ? 'Aktifkan mode terang' : 'Aktifkan mode gelap';
+      const isDark = theme === 'dark';
+      const nextLabel = isDark ? 'Aktifkan mode terang' : 'Aktifkan mode gelap';
       btn.setAttribute('aria-label', nextLabel);
       btn.setAttribute('title', nextLabel);
-      btn.setAttribute('aria-pressed', String(theme === 'dark'));
+      btn.setAttribute('aria-pressed', String(isDark));
+      const visibleLabel = btn.querySelector('.theme-toggle-label');
+      if (visibleLabel) visibleLabel.textContent = isDark ? 'Terang' : 'Gelap';
     }
   }
 

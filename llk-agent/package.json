@@ -7,7 +7,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "start": "node ops.mjs preflight && node server.js",
+    "start": "node start.mjs",
     "preflight": "node ops.mjs preflight",
     "backup": "node ops.mjs backup",
     "rotate": "node ops.mjs rotate"

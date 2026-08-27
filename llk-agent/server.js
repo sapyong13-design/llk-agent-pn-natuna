@@ -85,6 +85,7 @@ const bodyJson = req => new Promise((done, reject) => {
 });
 const employeeId = nip => String(nip || '').replace(/\D/g, '');
 const clean = value => String(value ?? '').replace(/\s+/g, ' ').trim();
+const isBreakActivity = value => /^(?:istirahat(?:\s+(?:siang|makan|shalat|makan\s+siang))?|ishoma(?:\s+dan\s+shalat)?|istirahat\s*,?\s*shalat(?:\s+dan\s+makan)?)(?:\s*[-–—].*)?$/i.test(clean(value));
 function safeId(value) { const id=String(value||''); if(!/^[A-Za-z0-9_-]{1,80}$/.test(id)) bad('ID pegawai tidak valid'); return id; }
 function canonical(value) { if(Array.isArray(value)) return `[${value.map(canonical).join(',')}]`; if(value&&typeof value==='object') return `{${Object.keys(value).sort().map(key=>`${JSON.stringify(key)}:${canonical(value[key])}`).join(',')}}`; return JSON.stringify(value); }
 function sanitize(value) { if(Array.isArray(value)) return value.map(sanitize); if(value&&typeof value==='object'){const out={}; for(const [key,item] of Object.entries(value)) if(!sensitiveKeys.test(key)) out[key]=sanitize(item); return out;} return typeof value==='string'?clean(value).slice(0,500):value; }
@@ -328,7 +329,8 @@ async function scrapeEntries(context, existingPage) {
           const rawDate = (cleanText(table.parentElement?.textContent).match(/Tanggal Kegiatan\s*:\s*([^,]+)/i) || rowText.match(/Tanggal Kegiatan\s*:\s*([^,]+)/i) || [])[1] || '';
           const type = /^(Utama|Pendukung)$/i.test(cells[typeIndex]) ? cells[typeIndex] : 'Pendukung';
           const result = cells[resultIndex] || 'Selesai';
-          output.push({ rawDate, start: times[0], end: times[1], description, type, result, isBreak: /^istirahat$/i.test(description) });
+          const isBreak = /^(?:istirahat(?:\s+(?:siang|makan|shalat|makan\s+siang))?|ishoma(?:\s+dan\s+shalat)?|istirahat\s*,?\s*shalat(?:\s+dan\s+makan)?)(?:\s*[-–—].*)?$/i.test(description);
+          output.push({ rawDate, start: times[0], end: times[1], description, type, result, isBreak });
         }
       }
       return output;
@@ -450,7 +452,7 @@ async function importVerifier(id, existingContext, existingPage){
 }
 async function templateSnapshot(){const templates=await readJson(templateFile);return templates.version&&templates.departments?templates:{version:1,updatedAt:null,departments:templates};}
 async function readPersonal(id){return existsSync(personalFile(id))?validatePersonal(await readJson(personalFile(id)),id):null;}
-function validatePersonal(value,id){if(!value||typeof value!=='object'||value.employeeId!==id||!Array.isArray(value.activities)||value.activities.length>1000)bad('Daftar kegiatan profil tidak valid');const activities=value.activities.map(a=>{const nama=clean(a?.nama),kategori=clean(a?.kategori)||'Pendukung';if(!nama||/^istirahat$/i.test(nama)||!['Utama','Pendukung'].includes(kategori))bad('Kegiatan profil tidak valid');return {nama,kategori,result:'Selesai',...(a.start?{start:clean(a.start)}:{}),...(a.end?{end:clean(a.end)}:{}),...(a.count?{count:a.count}:{}),...(a.lastSeen?{lastSeen:a.lastSeen}:{})};});return {...sanitize(value),employeeId:id,activities};}
+function validatePersonal(value,id){if(!value||typeof value!=='object'||value.employeeId!==id||!Array.isArray(value.activities)||value.activities.length>1000)bad('Daftar kegiatan profil tidak valid');const activities=value.activities.map(a=>{const nama=clean(a?.nama),kategori=clean(a?.kategori)||'Pendukung';if(!nama||isBreakActivity(nama)||!['Utama','Pendukung'].includes(kategori))bad('Kegiatan profil tidak valid');return {nama,kategori,result:'Selesai',...(a.start?{start:clean(a.start)}:{}),...(a.end?{end:clean(a.end)}:{})};});return {...value,activities};}
 async function personalResponse(employee){const personal=await readPersonal(employee.id),stored=await readJson(templateFile),departments=stored.departments||stored,fallback=departments[employee.department];return {source:personal?.activities?.length?'personal':'department',personal,activities:personal?.activities?.length?personal.activities:(fallback?.activities||[]),fallbackLabel:fallback?.label||employee.department};}
 async function importPersonal(id, existingContext, existingPage) {
   const employee = await findEmployee(id), owned = !existingContext, { context } = existingContext ? { context: existingContext } : await launchEmployee(id);
@@ -460,7 +462,7 @@ async function importPersonal(id, existingContext, existingPage) {
     const seen = new Map();
     for (const entry of Array.isArray(entries) ? entries : []) {
       const nama = clean(entry.description);
-      if (!nama || /^istirahat$/i.test(nama)) continue;
+      if (!nama || entry.isBreak || isBreakActivity(nama)) continue;
       const activity = { nama, kategori: /^(Utama|Pendukung)$/i.test(entry.type) ? clean(entry.type) : 'Pendukung' };
       const result = clean(entry.result || entry.output); if (result) activity.result = result;
       const key = canonical(activity);
@@ -713,7 +715,7 @@ async function verificationTargets(id, context, extractIds = true) {
       const dow=row.date?parseDate(row.date).getDay():null,expectedEnd=dow===5?'17:00':dow>=1&&dow<=4?'16:30':null;
       if(!row.activities?.length)issues.push('Rincian kegiatan tidak terbaca dari tabel target');
       else if(expectedEnd&&end!==expectedEnd)issues.push(`Jam akhir ${end||'tidak terbaca'}; seharusnya ${expectedEnd}`);
-      const work=row.activities?.filter(item=>!/^istirahat$/i.test(clean(item.description)))||[];
+      const work=row.activities?.filter(item=>!isBreakActivity(item.description))||[];
       if(row.activities?.length&&!work.length)issues.push('Deskripsi kegiatan hanya berisi Istirahat');
       else if(work.some(item=>!clean(item.description)||clean(item.description).length<4))issues.push('Deskripsi kegiatan belum benar atau tidak terbaca');
       row.valid=issues.length===0;row.issues=issues;

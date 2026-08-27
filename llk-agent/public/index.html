@@ -57,6 +57,11 @@
     </header>
 
     <p id="appFeedback" class="inline-feedback" role="status" aria-live="polite" hidden></p>
+    <section class="workbench-status" id="workbenchStatus" aria-live="polite">
+      <div class="workbench-status__step"><span class="workbench-status__number" id="currentStepNumber">1</span><div><strong id="currentStepTitle">Masuk ke LLK</strong><small id="currentStepDetail">Buka SSO untuk memulai pengisian.</small></div></div>
+      <p class="workbench-status__hint" id="currentStepHint">Kredensial SSO tidak disimpan aplikasi.</p>
+    </section>
+
 
     <div id="workspace" hidden>
       <ol class="workflow" aria-label="Alur pengisian LLK">
@@ -172,16 +177,19 @@
               <div class="send-bar">
                 <button class="btn btn-outline step-back" type="button" data-go-step="2">Ubah tanggal</button>
                 <div class="form-group compact-field">
-                  <label for="duplicatePolicy">Tanggal duplikat</label>
+                  <label for="duplicatePolicy">Tanggal sudah ada</label>
                   <select class="form-control" id="duplicatePolicy">
-                    <option value="skip">Lewati</option>
-                    <option value="abort">Batalkan semua</option>
+                    <option value="skip">Lewati tanggal yang sudah ada</option>
+                    <option value="abort">Batalkan bila ada duplikat</option>
                   </select>
                 </div>
                 <label class="check-row">
-                  <input type="checkbox" id="confirmCheck"> Saya memastikan data sesuai pekerjaan nyata.
+                  <input type="checkbox" id="confirmCheck"> Saya sudah memeriksa isian dan memastikan sesuai pekerjaan nyata.
                 </label>
-                <button class="btn btn-primary send-button" id="submitBtn" disabled>Kirim ke LLK</button>
+                <div class="send-action">
+                  <small id="sendReadiness">Centang konfirmasi untuk mengirim.</small>
+                  <button class="btn btn-primary send-button" id="submitBtn" disabled>Kirim ke LLK</button>
+                </div>
               </div>
             </div>
 
@@ -203,8 +211,9 @@
       </ol>
 
       <details class="terminal-panel">
-        <summary><span class="terminal-prompt" id="progressTitle">Log aktivitas</span><span id="logLatest"></span></summary>
+        <summary><span class="terminal-prompt" id="progressTitle">Log teknis</span><span id="logLatest">Proses terbaru tampil di sini bila diperlukan.</span></summary>
         <div class="terminal-header">
+          <p>Untuk pemeriksaan masalah. Tidak diperlukan saat pengisian normal.</p>
           <button class="btn btn-sm btn-outline" id="clearLogBtn" type="button">Bersihkan</button>
         </div>
         <pre class="log-box" id="logBox" aria-live="polite">Menunggu proses…</pre>

@@ -4,6 +4,7 @@ import { existsSync } from 'node:fs';
 import { join, resolve, extname, relative, isAbsolute } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 import { chromium } from 'playwright-core';
+import { browserLaunchOptions } from './browser.mjs';
 
 const ROOT = resolve(import.meta.dirname);
 const PUBLIC = join(ROOT, 'public');
@@ -152,8 +153,9 @@ async function launchEmployee(id, headless = true) {
   await mkdir(dir, { recursive: true });
   if (!headless) await ensurePasswordManagerPrefs(dir);
   let context;
-  if(headless){const browser=await chromium.launch({channel:'msedge',headless:true});context=await browser.newContext({viewport:{width:1365,height:768}});context.on('close',()=>browser.close().catch(()=>{}));}
-  else context=await chromium.launchPersistentContext(dir,{channel:'msedge',headless:false,viewport:null});
+  const launchOptions = browserLaunchOptions();
+  if (headless) { const browser = await chromium.launch({ ...launchOptions, headless: true }); context = await browser.newContext({ viewport: { width: 1365, height: 768 } }); context.on('close', () => browser.close().catch(() => {})); }
+  else context = await chromium.launchPersistentContext(dir, { ...launchOptions, headless: false, viewport: null });
   const cookies = await loadSessionCookies(id);
   if (cookies?.length) await context.addCookies(cookies);
   return { employee, context };

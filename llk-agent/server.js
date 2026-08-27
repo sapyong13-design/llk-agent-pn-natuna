@@ -207,10 +207,7 @@ function inferSchedulePattern(day, priorEntries) {
     if (JSON.stringify(work) === JSON.stringify(full)) patterns.add('full');
   }
   if (patterns.size === 1) return [...patterns][0];
-  const expectedBreakEnd = day.dow === 5 ? '13:30' : '13:00';
-  const hasMatchingBreak = (priorEntries || []).some(entry => entry.isBreak && entry.start === '12:00' && entry.end === expectedBreakEnd);
-  if (hasMatchingBreak) return 'split';
-  throw new HttpError(409, `Pola jadwal ${day.dow === 5 ? 'Jumat' : 'Senin–Kamis'} belum dapat dibaca dari LLK sebelumnya. Pastikan halaman LLK memuat kegiatan dan istirahat dengan jam lengkap.`);
+  return 'split';
 }
 async function generatePreview(employee, start, end, source = 'page', department, pageActivities = [], priorEntries = []) {
   if (!employee) throw new HttpError(404, 'Pegawai tidak ditemukan');

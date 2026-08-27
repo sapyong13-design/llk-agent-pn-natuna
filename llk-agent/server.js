@@ -897,7 +897,27 @@ const mime={'.html':'text/html; charset=utf-8','.css':'text/css; charset=utf-8',
 await mkdir(DATA,{recursive:true,mode:0o700}); await mkdir(PROFILE_ROOT,{recursive:true,mode:0o700}); await mkdir(personalTemplateRoot,{recursive:true,mode:0o700}); await mkdir(personalHistoryRoot,{recursive:true,mode:0o700});
 for(const entry of await readdir(PROFILE_ROOT).catch(()=>[]))if(entry.startsWith('temp-'))await rm(join(PROFILE_ROOT,entry),{recursive:true,force:true}).catch(()=>{});
 if(process.platform!=='win32')await Promise.all([chmod(DATA,0o700),chmod(PROFILE_ROOT,0o700)]);
-const server=createServer(async(req,res)=>{try{const url=new URL(req.url,`http://${req.headers.host||'127.0.0.1'}`);if(url.pathname.startsWith('/api/'))return await api(req,res,url);let decoded;try{decoded=decodeURIComponent(url.pathname);}catch{bad('Path tidak valid');}const file=resolve(PUBLIC,decoded==='/'?'index.html':decoded.slice(1)),rel=relative(PUBLIC,file);if(rel.startsWith('..')||isAbsolute(rel))throw new HttpError(403,'Akses ditolak');res.writeHead(200,{'content-type':mime[extname(file)]||'application/octet-stream'});res.end(await readFile(file));}catch(error){if(!res.headersSent)json(res,error.status||400,{error:error.message||'Permintaan gagal'});else if(!res.writableEnded)res.end();}});
+const server = createServer((req, res) => {
+  void (async () => {
+    try {
+      const url = new URL(req.url, `http://${req.headers.host || '127.0.0.1'}`);
+      if (url.pathname.startsWith('/api/')) return await api(req, res, url);
+      let decoded;
+      try { decoded = decodeURIComponent(url.pathname); } catch { bad('Path tidak valid'); }
+      const file = resolve(PUBLIC, decoded === '/' ? 'index.html' : decoded.slice(1)), rel = relative(PUBLIC, file);
+      if (rel.startsWith('..') || isAbsolute(rel)) throw new HttpError(403, 'Akses ditolak');
+      res.writeHead(200, { 'content-type': mime[extname(file)] || 'application/octet-stream' });
+      res.end(await readFile(file));
+    } catch (error) {
+      if (!res.headersSent) json(res, error.status || 500, { error: error.message || 'Permintaan gagal' });
+      else if (!res.writableEnded) res.end();
+    }
+  })().catch(error => {
+    console.error('Unhandled request failure:', error);
+    if (!res.headersSent) json(res, 500, { error: 'Permintaan gagal diproses' });
+    else if (!res.writableEnded) res.end();
+  });
+});
 server.listen(PORT,'127.0.0.1',()=>console.log(`LLK Agent PN Natuna: http://127.0.0.1:${PORT}`));
 let stopping=false;const shutdown=async()=>{if(stopping)return;stopping=true;await Promise.all([...loginFlows].map(([id,flow])=>closeLoginFlow(id,flow)));for(const id of stagedVerification.keys())closeVerificationStage(id);server.close(()=>process.exit(0));setTimeout(()=>process.exit(1),10_000).unref();};
 process.on('SIGINT',shutdown);process.on('SIGTERM',shutdown);

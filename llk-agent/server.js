@@ -535,11 +535,12 @@ async function resolveLlkSupervisor(page, nip) {
   await option.waitFor({ state: 'visible', timeout: 15000 });
   const resultText = clean(await option.textContent());
   await option.click();
+  const selectedValue = clean(await page.locator(`#${binding.nipControl.id}, [name="${binding.nipControl.name}"]`).first().inputValue());
   const nameField = binding.nameControl ? page.locator(`#${binding.nameControl.id}, [name="${binding.nameControl.name}"]`).first() : page.locator('input[readonly], input[disabled]').filter({ hasNot: page.locator('[type="hidden"]') }).last();
   await nameField.waitFor({ state: 'visible', timeout: 10000 });
   const name = clean(await nameField.inputValue());
-  if (!name) throw new Error(`Pilihan atasan belum mengisi nama untuk NIP ${nip}`);
-  return { id: nip, nip, name, url: page.url(), resultText, control: 'interactive-select2' };
+  if (!selectedValue || !name) throw new Error(`Pilihan atasan belum lengkap untuk NIP ${nip}`);
+  return { id: selectedValue, nip, name, url: page.url(), resultText, control: 'interactive-select2' };
 }
 async function enrichEmployeeFromSso(employee, page) {
   const originalUrl = page.url();

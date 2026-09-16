@@ -27,6 +27,20 @@ function feedback(message = '', isError = false) {
   node.className = `inline-feedback ${isError ? 'is-error' : ''}`;
 }
 
+function updateWorkbenchStatus(step) {
+  const copy = {
+    1: ['Masuk ke LLK', 'Buka SSO pada jendela Edge yang muncul.', 'Selesaikan login di Edge, lalu kembali ke sini.'],
+    2: ['Pilih tanggal LLK', 'Pilih rentang hari kerja yang ingin diisi.', 'Hari libur dan akhir pekan tidak akan dibuatkan LLK.'],
+    3: ['Periksa & kirim', 'Periksa kegiatan, waktu, dan atasan sebelum mengirim.', 'Edit hanya bila isian tidak sesuai pekerjaan nyata.']
+  };
+  const [title, detail, hint] = copy[step] || copy[1];
+  const number = $('#currentStepNumber'), titleNode = $('#currentStepTitle'), detailNode = $('#currentStepDetail'), hintNode = $('#currentStepHint');
+  if (number) number.textContent = step;
+  if (titleNode) titleNode.textContent = title;
+  if (detailNode) detailNode.textContent = detail;
+  if (hintNode) hintNode.textContent = hint;
+}
+
 function log(message) {
   const box = $('#logBox');
   if (!box) return;
@@ -65,8 +79,9 @@ function syncControls() {
 
   if (loginBtn) loginBtn.disabled = busy || flow === 'waiting' || flow === 'completing';
   if (completeLoginBtn) completeLoginBtn.disabled = busy || flow !== 'waiting';
-  if (cancelLoginBtn) cancelLoginBtn.disabled = busy || (flow !== 'waiting' && flow !== 'completing');
   if (submitBtn) submitBtn.disabled = busy || !currentPreview || !$('#confirmCheck')?.checked;
+  const readiness = $('#sendReadiness');
+  if (readiness) readiness.textContent = busy ? 'Sedang memproses. Jangan tutup aplikasi.' : !currentPreview ? 'Siapkan isian terlebih dahulu.' : $('#confirmCheck')?.checked ? 'Siap dikirim ke LLK.' : 'Centang konfirmasi untuk mengirim.';
   if (applyPersonalTemplateBtn) applyPersonalTemplateBtn.disabled = busy || !personalStage || !$('#personalStageConfirm')?.checked;
   if (deleteConfirmBtn) deleteConfirmBtn.disabled = busy || $('#deleteConfirm')?.value !== (active?.id || 'HAPUS');
   const verify = $('[name="workflowMode"]:checked')?.value === 'verify';
@@ -88,6 +103,14 @@ async function api(path, options = {}) {
     throw error;
   }
   return data;
+}
+
+function recoveryMessage(error) {
+  const message = String(error?.message || '');
+  if (error?.status === 401 || /sesi.*(?:berakhir|kedaluwarsa)|login.*belum/i.test(message)) return 'Login SSO perlu diperbarui. Buka SSO lagi, selesaikan login di Edge, lalu ulangi langkah ini.';
+  if (error?.status === 409 || /jadwal|pola|duplikat/i.test(message)) return 'Data LLK perlu diperiksa. Kembali ke langkah sebelumnya, periksa tanggal atau isian, lalu coba lagi.';
+  if (/failed to fetch|networkerror|fetch failed/i.test(message)) return 'Aplikasi lokal tidak merespons. Pastikan LLK Agent masih terbuka, lalu muat ulang halaman.';
+  return 'Coba ulangi langkah ini. Bila tetap gagal, buka Log teknis dan kirim pesan terakhirnya.';
 }
 
 async function pollOperationProgress(employeeId,signal){
@@ -113,7 +136,7 @@ async function runBusy(action, operationName = 'Operasi') {
   } catch (error) {
     const msg = `${operationName} gagal: ${error.message}`;
     log(msg);
-    feedback(msg, true);
+    feedback(`${msg} ${recoveryMessage(error)}`, true);
   } finally {
     controller.abort();
     await polling;
@@ -284,6 +307,7 @@ function setWizardStep(step) {
     node.classList.toggle('is-pending', n > step);
     node.classList.toggle('is-done', n < step);
   });
+  updateWorkbenchStatus(step);
   syncControls();
 }
 
@@ -589,28 +613,16 @@ function renderReport(report) {
   if (!reportArea) return;
   reportArea.hidden = false;
   $('#previewArea').hidden = true;
-
   const results = report.results || report.dates || [];
-  const counts = results.reduce((acc, r) => {
-    const s = r.status === 'awaiting_supervisor' || r.submitted || r.verified ? 'saved' : r.skipped ? 'skipped' : 'failed';
-    acc[s] = (acc[s] || 0) + 1;
+  const counts = results.reduce((acc, row) => {
+    const state = row.status === 'awaiting_supervisor' || row.submitted || row.verified ? 'saved' : row.skipped ? 'skipped' : 'failed';
+    acc[state] = (acc[state] || 0) + 1;
     return acc;
   }, {});
-
   const summary = $('#reportSummary');
-  if (summary) {
-    summary.innerHTML = `<strong>Ringkasan:</strong> ${counts.saved || 0} tanggal tersimpan di LLK · ${counts.skipped || 0} dilewati (duplikat) · ${counts.failed || 0} gagal`;
-  }
-
+  if (summary) summary.innerHTML = `<strong>Ringkasan:</strong> ${counts.saved || 0} tanggal tersimpan di LLK · ${counts.skipped || 0} dilewati · ${counts.failed || 0} perlu ditindaklanjuti`;
   const meta = $('#reportMeta');
-  if (meta) {
-    meta.innerHTML = `<dl>
-      <div><dt>Waktu</dt><dd>${escapeHtml(report.at || '—')}</dd></div>
-      <div><dt>Profil</dt><dd>${escapeHtml(report.employee?.name || active?.name || '—')}</dd></div>
-      <div><dt>Kebijakan</dt><dd>${escapeHtml(report.duplicatePolicy || '—')}</dd></div>
-    </dl>`;
-  }
-
+  if (meta) meta.innerHTML = `<dl><div><dt>Waktu</dt><dd>${escapeHtml(report.at || '—')}</dd></div><div><dt>Profil</dt><dd>${escapeHtml(report.employee?.name || active?.name || '—')}</dd></div><div><dt>Kebijakan</dt><dd>${escapeHtml(report.duplicatePolicy || '—')}</dd></div></dl>`;
   const resultsNode = $('#reportResults');
   if (resultsNode) {
     resultsNode.innerHTML = results.length ? results.map(row => `
@@ -623,7 +635,6 @@ function renderReport(report) {
       </div>
     `).join('') : '<p class="field-help">Belum ada rincian laporan.</p>';
   }
-
   updatePreviewStatuses(currentPreview, report);
   reportArea.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
@@ -1188,10 +1199,13 @@ document.addEventListener('DOMContentLoaded', () => {
     try { localStorage.setItem(STORAGE_KEY, theme); } catch (e) { /* private mode */ }
     if (meta) meta.setAttribute('content', META_COLORS[theme]);
     if (btn) {
-      const nextLabel = theme === 'dark' ? 'Aktifkan mode terang' : 'Aktifkan mode gelap';
+      const isDark = theme === 'dark';
+      const nextLabel = isDark ? 'Aktifkan mode terang' : 'Aktifkan mode gelap';
       btn.setAttribute('aria-label', nextLabel);
       btn.setAttribute('title', nextLabel);
-      btn.setAttribute('aria-pressed', String(theme === 'dark'));
+      btn.setAttribute('aria-pressed', String(isDark));
+      const visibleLabel = btn.querySelector('.theme-toggle-label');
+      if (visibleLabel) visibleLabel.textContent = isDark ? 'Terang' : 'Gelap';
     }
   }
 

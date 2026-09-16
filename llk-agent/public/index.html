@@ -27,6 +27,7 @@
         <button class="btn btn-sm" id="themeToggleBtn" type="button" aria-label="Ganti mode terang/gelap" title="Ganti mode terang/gelap">
           <svg class="theme-icon-sun" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
           <svg class="theme-icon-moon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+          <span class="theme-toggle-label">Tema</span>
         </button>
         <div class="profile-chip">
           <span class="profile-dot" aria-hidden="true"></span>
@@ -190,16 +191,19 @@
               <div class="send-bar">
                 <button class="btn btn-outline step-back" type="button" data-go-step="2">Ubah tanggal</button>
                 <div class="form-group compact-field">
-                  <label for="duplicatePolicy">Tanggal duplikat</label>
+                  <label for="duplicatePolicy">Tanggal sudah ada</label>
                   <select class="form-control" id="duplicatePolicy">
-                    <option value="skip">Lewati</option>
-                    <option value="abort">Batalkan semua</option>
+                    <option value="skip">Lewati tanggal yang sudah ada</option>
+                    <option value="abort">Batalkan bila ada duplikat</option>
                   </select>
                 </div>
                 <label class="check-row">
-                  <input type="checkbox" id="confirmCheck"> Saya memastikan data sesuai pekerjaan nyata.
+                  <input type="checkbox" id="confirmCheck"> Saya sudah memeriksa isian dan memastikan sesuai pekerjaan nyata.
                 </label>
-                <button class="btn btn-primary send-button" id="submitBtn" disabled>Kirim ke LLK</button>
+                <div class="send-action">
+                  <small id="sendReadiness">Centang konfirmasi untuk mengirim.</small>
+                  <button class="btn btn-primary send-button" id="submitBtn" disabled>Kirim ke LLK</button>
+                </div>
               </div>
             </div>
 
@@ -223,6 +227,7 @@
       <details class="terminal-panel">
         <summary><span class="terminal-prompt" id="progressTitle">Log aktivitas</span><span id="logLatest" hidden></span></summary>
         <div class="terminal-header">
+          <p>Untuk pemeriksaan masalah. Tidak diperlukan saat pengisian normal.</p>
           <button class="btn btn-sm btn-outline" id="clearLogBtn" type="button">Bersihkan</button>
         </div>
         <pre class="log-box" id="logBox" aria-live="polite">Menunggu proses…</pre>

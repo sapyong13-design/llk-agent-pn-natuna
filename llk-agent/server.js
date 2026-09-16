@@ -168,15 +168,36 @@ async function closeLoginFlow(id, flow = loginFlows.get(id)) {
   if (id.startsWith('temp-')) await rm(profilePath(id), { recursive: true, force: true }).catch(() => {});
   return true;
 }
+async function minimizeLoginWindow(context) {
+  const page = context.pages()[0];
+  if (!page) return;
+  const session = await context.newCDPSession(page);
+  try {
+    const { windowId } = await session.send('Browser.getWindowForTarget');
+    await session.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'minimized' } });
+  } finally { await session.detach(); }
+}
 async function openLogin(id) {
+  const existing = loginFlows.get(id);
+  if (existing?.completed) {
+    const page = existing.context.pages()[0];
+    if (page) {
+      const session = await existing.context.newCDPSession(page);
+      try {
+        const { windowId } = await session.send('Browser.getWindowForTarget');
+        await session.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'normal' } });
+      } finally { await session.detach(); }
+    }
+    await existing.context.pages()[0]?.bringToFront();
+    return { active: true, createdAt: existing.createdAt, expiresAt: null, message: 'Jendela SSO dibuka kembali.' };
+  }
   if (locks.has(id) || loginFlows.has(id)) throw new HttpError(409, 'Operasi pegawai sedang berjalan');
   locks.add(id);
   try {
     const { employee, context } = await launchEmployee(id, false), createdAt = new Date().toISOString();
-    const flow = { employee, context, createdAt, expiresAt: new Date(Date.now() + LOGIN_FLOW_TTL).toISOString(), closing: false };
+    const flow = { employee, context, createdAt, expiresAt: null, closing: false };
     loginFlows.set(id, flow);
     context.on('close', () => { if (loginFlows.get(id) === flow) { clearTimeout(flow.timer); loginFlows.delete(id); locks.delete(id); } });
-    flow.timer = setTimeout(() => closeLoginFlow(id, flow), LOGIN_FLOW_TTL); flow.timer.unref?.();
     const page = context.pages()[0] ?? await context.newPage();
     await page.goto(LLK_BASE, { waitUntil: 'domcontentloaded' });
     return { active: true, createdAt, expiresAt: flow.expiresAt, message: 'Edge dibuka. Selesaikan login SSO, lalu klik Selesai Login.' };
@@ -603,7 +624,10 @@ async function completeExternalBootstrap(tempId, tempEmployee, context) {
     flow.employee = enriched;
     flow.actualNip = actualNip;
     flow.fetchedAt = new Date().toISOString();
+    clearTimeout(flow.timer);
+    flow.expiresAt = null;
   }
+  await minimizeLoginWindow(context).catch(error => console.warn('SSO tidak dapat diminimalkan:', error.message));
   return { employee: enriched, verifier: { available: false, warning: null }, history, sessionActive: true, tempId };
 }
 
@@ -619,7 +643,11 @@ async function completeLogin(id){
   }
   const history = await importPersonal(id, flow.context, page); if (history.warning) warnings.push(history.warning);
   await storeSessionCookies(id, await flow.context.cookies());
-  await closeLoginFlow(id, flow);
+  clearTimeout(flow.timer);
+  flow.completed = true;
+  flow.expiresAt = null;
+  locks.delete(id);
+  await minimizeLoginWindow(flow.context).catch(error => console.warn('SSO tidak dapat diminimalkan:', error.message));
   return { active: false, authenticated: true, stage: 'complete', identity: employee.accountIdentity, employee, warning: warnings.join(' ') || null, warnings, verifier: { available: false, warning: null }, history, autoApplied: false };
 }
 async function verificationTargets(id, context, extractIds = true) {
@@ -766,15 +794,24 @@ async function runAutomaticVerification(id,input) {
   try {
     for(const [index,target] of targets.entries()){
       progress(id,'verify-target',`Memverifikasi ${index+1}/${targets.length} dari hasil filter yang sama…`,{target:index+1,totalTargets:targets.length,hllk:target.hllk,date:target.date});
+      let page;
       try {
-        const page=stage.context.pages()[0]??await stage.context.newPage();
+        page=await stage.context.newPage();
         await page.goto(target.editUrl,{waitUntil:'domcontentloaded',referer:stage.filter.url,timeout:60000});
         const form=page.locator('form[action*="/verifikasi/update"]').first();
         if(!await form.count())throw new Error('Form verifikasi tidak ditemukan pada LLK target');
-        const submitted=await Promise.all([page.waitForLoadState('domcontentloaded',{timeout:30000}).catch(()=>{}),form.evaluate((node,note)=>{const set=(name,value)=>{const field=node.querySelector(`[name="${name}"]`);if(!field)return false;field.value=value;field.dispatchEvent(new Event('input',{bubbles:true}));field.dispatchEvent(new Event('change',{bubbles:true}));return true;};if(!set('note',note)||!set('verified','2'))throw new Error('Kolom catatan atau status verifikasi tidak ditemukan');node.requestSubmit();},message)]);
+        if(await form.locator('[name="hllk"]').inputValue()!==String(target.hllk))throw new Error('Identitas LLK pada form tidak sesuai target');
+        await form.evaluate((node,note)=>{const set=(name,value)=>{const fields=[...node.querySelectorAll(`[name="${name}"]`)];if(!fields.length)throw new Error(`Kolom ${name} tidak ditemukan`);for(const field of fields){if(field.type==='radio'||field.type==='checkbox')field.checked=field.value===value;else field.value=value;field.dispatchEvent(new Event('input',{bubbles:true}));field.dispatchEvent(new Event('change',{bubbles:true}));}};set('note',note);set('verified','2');if(!node.checkValidity())throw new Error('Form verifikasi tidak valid');},message);
+        const [response]=await Promise.all([page.waitForNavigation({waitUntil:'domcontentloaded',timeout:60000}),form.evaluate(node=>node.requestSubmit())]);
+        if(!response?.ok())throw new Error(`Pengiriman verifikasi gagal: HTTP ${response?.status()||0}. Pindai ulang untuk memastikan status sebelum mencoba lagi.`);
         if(!llkLocation(page.url()).authenticated)throw new Error('Sesi LLK kedaluwarsa saat mengirim verifikasi');
+        const confirmation=await page.goto(target.editUrl,{waitUntil:'domcontentloaded',referer:stage.filter.url,timeout:60000});
+        if(!confirmation?.ok()||!llkLocation(page.url()).authenticated)throw new Error('Status hasil kirim belum dapat dipastikan. Pindai ulang sebelum mencoba lagi.');
+        const persisted=await page.evaluate(()=>{const form=document.querySelector('form[action*="/verifikasi/update"]');return {hllk:form?.querySelector('[name="hllk"]')?.value,verified:form?.querySelector('select[name="verified"],input[name="verified"]:checked,input[type="hidden"][name="verified"]')?.value};});
+        if(persisted.hllk!==String(target.hllk)||persisted.verified!=='2')throw new Error('Status Terverifikasi belum terbukti tersimpan di LLK. Pindai ulang sebelum mencoba lagi.');
         results.push({hllk:target.hllk,date:target.date,status:200,success:true,url:page.url()});
       } catch(error) { results.push({hllk:target.hllk,date:target.date,status:0,success:false,error:verificationErrorMessage(error)}); }
+      finally { await page?.close().catch(()=>{}); }
     }
     await audit('verification.auto',id,{message,targetIds:targets.map(item=>item.hllk),filter:stage.filter},{counts:{total:results.length,success:results.filter(item=>item.success).length},result:'completed'});
     return {total:results.length,success:results.filter(item=>item.success).length,failed:results.filter(item=>!item.success).length,results,filter:stage.filter};
@@ -800,9 +837,9 @@ async function api(req,res,url) {
     if(!supervisorNip)bad('NIP atasan wajib diisi');
     const satker=clean(input.satker)||'Satker Lain';
     const {employee,context,tempId}=await launchExternalBootstrap(satker,supervisorNip,input.department);
-    const flow={employee,context,createdAt:new Date().toISOString(),expiresAt:new Date(Date.now()+LOGIN_FLOW_TTL).toISOString(),closing:false};
+    const flow={employee,context,createdAt:new Date().toISOString(),expiresAt:null,closing:false};
     loginFlows.set(tempId,flow);
-    flow.timer=setTimeout(()=>closeLoginFlow(tempId,flow),LOGIN_FLOW_TTL);
+    context.on('close', () => { if (loginFlows.get(tempId) === flow) { loginFlows.delete(tempId); rm(profilePath(tempId), { recursive: true, force: true }).catch(() => {}); } });
     const page=context.pages()[0]??await context.newPage();
     await page.goto(LLK_BASE,{waitUntil:'domcontentloaded'});
     return json(res,200,{tempId,message:'Browser login dibuka. Silakan login akun LLK Anda.'});
@@ -873,11 +910,12 @@ async function api(req,res,url) {
   if (action === 'personal-template/import' && req.method === 'POST') return json(res, 200, await withLock(id, () => importPersonal(id)));
   if (action === 'session/status' && req.method === 'GET') {
     const flow = loginFlows.get(id);
-    if (flow && !flow.closing) return json(res, 200, { authenticated: Boolean(authenticatedLlkPage(flow.context)), source: 'active-login' });
+    if (flow && !flow.closing) await storeSessionCookies(id, await flow.context.cookies());
     const { context } = await launchEmployee(id, true);
     try {
       const page = context.pages()[0] ?? await context.newPage();
-      await page.goto(LLK_BASE, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+      const response = await page.goto(LLK_BASE, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      if (!response?.ok()) throw new HttpError(502, 'Status sesi belum dapat diperiksa. Coba periksa lagi.');
       return json(res, 200, { authenticated: llkLocation(page.url()).authenticated, source: 'saved-session' });
     } finally {
       await context.close();

@@ -2,6 +2,7 @@ let employees = [], templates = {}, active = null, currentPreview = null, curren
 const loginFlows = new Map();
 let bootstrapFlow = sessionStorage.getItem('bootstrapFlow');
 let verificationTargets = [];
+let verificationScanned = false;
 let loginPollTimer = null;
 const editDayState = new Set();
 let calendarDays = new Map();
@@ -44,6 +45,8 @@ function log(message) {
 function setBusy(value) {
   busy = value;
   document.body.classList.toggle('is-busy', value);
+  $('#operationStatus').hidden = !value;
+  if (value) $('#operationStatus').textContent = 'Proses berjalan. Tunggu sampai selesai.';
   syncControls();
 }
 
@@ -66,6 +69,13 @@ function syncControls() {
   if (submitBtn) submitBtn.disabled = busy || !currentPreview || !$('#confirmCheck')?.checked;
   if (applyPersonalTemplateBtn) applyPersonalTemplateBtn.disabled = busy || !personalStage || !$('#personalStageConfirm')?.checked;
   if (deleteConfirmBtn) deleteConfirmBtn.disabled = busy || $('#deleteConfirm')?.value !== (active?.id || 'HAPUS');
+  const verify = $('[name="workflowMode"]:checked')?.value === 'verify';
+  if ($('#navReview')) $('#navReview').disabled = busy || verify || (!currentPreview && !currentReport);
+  if ($('#runWizardVerificationBtn')) $('#runWizardVerificationBtn').disabled = busy || !verificationTargets.length || !verificationStageToken;
+  document.querySelectorAll('[data-calendar-date]').forEach(control => {
+    const date = parseIsoDate(control.dataset.calendarDate);
+    control.disabled = busy || control.dataset.calendarDate > isoDate(new Date()) || [0, 6].includes(date.getDay()) || calendarDays.has(control.dataset.calendarDate);
+  });
 }
 
 async function api(path, options = {}) {
@@ -169,9 +179,8 @@ async function loadEmployees() {
 async function loadApp() {
   log('Memulai LLK Agent…');
   await Promise.all([loadTemplates(), loadEmployees(), loadCalendar()]);
-  const initial = employees[0] || null;
+  const initial = employees.find(employee => employee.id === localStorage.getItem('lastAccountId')) || employees[0] || null;
   const satker = initial?.satker || '';
-  $('#satkerSelect').textContent = satker || 'Satker lainnya';
   if (initial) selectEmployee(initial);
   log(`Sistem siap. Satker: ${satker || 'Satker lainnya'}. Profil aktif: ${initial?.name || 'Belum dipilih'}`);
   if (!employees.length) {
@@ -195,13 +204,19 @@ async function loadApp() {
 function renderLoginFlow() {
   const state = (active && loginFlows.get(active.id)) || 'idle';
   const waiting = state === 'waiting' || state === 'completing';
+  const satker = String(active?.satker || '').trim();
+  $('#satkerSelect').textContent = satker;
+  $('#satkerSelect').hidden = state !== 'review' || !satker || /^satker lain(?:nya)?$/i.test(satker);
   const loginBtn = $('#loginBtn');
   const completeLoginBtn = $('#completeLoginBtn');
   const cancelLoginBtn = $('#cancelLoginBtn');
   const detail = $('#loginFlowDetail');
   const stateBadge = $('#authStepState');
 
-  if (loginBtn) loginBtn.hidden = waiting;
+  if (loginBtn) { loginBtn.hidden = waiting || ['checking', 'error', 'review'].includes(state); loginBtn.textContent = `Login ulang sebagai ${active?.name || 'akun ini'}`; }
+  $('#retrySessionBtn').hidden = state !== 'error';
+  $('#openAccountBrowserBtn').hidden = state !== 'review';
+  $('#loginFlowTitle').textContent = 'Masuk ke LLK';
   if (completeLoginBtn) completeLoginBtn.hidden = !waiting;
   if (cancelLoginBtn) cancelLoginBtn.hidden = !waiting;
 
@@ -211,14 +226,17 @@ function renderLoginFlow() {
       : state === 'completing'
         ? 'Login terdeteksi. Memeriksa identitas dan relasi verifikator…'
         : state === 'review'
-          ? 'Login berhasil dan sesi aktif.'
-          : 'Buka SSO untuk memulai. Kredensial tidak disimpan aplikasi.';
+          ? 'Sesi SSO masih aktif. Lanjut tanpa login ulang.'
+          : state === 'checking' ? 'Memeriksa sesi akun tersimpan. Tidak perlu membuka SSO dahulu.'
+          : state === 'error' ? 'Status sesi belum dapat diperiksa. Periksa koneksi lalu coba lagi; ini belum berarti sesi kedaluwarsa.'
+          : 'Data akun tetap tersimpan. Sesi SSO perlu diperbarui sebelum bekerja.';
   }
 
   if (stateBadge) {
     stateBadge.textContent = state === 'waiting' ? 'Menunggu SSO'
       : state === 'completing' ? 'Memverifikasi'
-      : state === 'review' ? 'Login aktif' : 'Belum masuk';
+      : state === 'review' ? 'Sesi aktif' : state === 'checking' ? 'Memeriksa sesi…' : state === 'error' ? 'Belum dapat diperiksa' : 'Perlu login';
+    $('#loginBadge').textContent = stateBadge.textContent;
   }
 
   syncControls();
@@ -227,7 +245,39 @@ function stopLoginPolling() {
   clearTimeout(loginPollTimer);
   loginPollTimer = null;
 }
+async function checkAccountSession() {
+  if (!active) return;
+  const id = active.id;
+  loginFlows.set(id, 'checking'); renderLoginFlow();
+  try {
+    const status = await api(`/api/employees/${id}/session/status`);
+    if (active?.id !== id) return;
+    loginFlows.set(id, status.authenticated ? 'review' : 'idle');
+  } catch {
+    if (active?.id !== id) return;
+    loginFlows.set(id, 'error');
+  }
+  renderLoginFlow();
+  setWizardStep(loginFlows.get(active?.id) === 'review' ? 2 : 1);
+}
 function setWizardStep(step) {
+  if (step !== 1 && loginFlows.get(active?.id) !== 'review') step = 1;
+  const mode = $('[name="workflowMode"]:checked')?.value;
+  $('#workChoices').hidden = step === 1 || Boolean(mode);
+  $('.workflow-nav').hidden = step === 1 || !mode;
+  $('#accountSessionBtn').hidden = step === 1;
+  const verify = $('[name="workflowMode"]:checked')?.value === 'verify';
+  if (step === 3 && (verify || (!currentPreview && !currentReport))) step = 2;
+  $('#createLlkMode').hidden = verify || !mode;
+  $('#verifyLlkMode').hidden = !verify;
+  $('#workTitle').textContent = !mode ? 'Apa yang ingin dikerjakan?' : verify ? 'Verifikasi LLK Anggota' : 'Pilih tanggal LLK';
+  $('#workHint').textContent = !mode ? 'Pilih Buat LLK atau Verifikasi LLK Anggota di atas.' : verify ? 'Periksa daftar anggota, isi pesan, lalu verifikasi.' : 'Pilih rentang hari kerja dan sumber kegiatan sebelum meninjau isian.';
+  $('#navWork').textContent = verify ? 'Daftar verifikasi' : 'Tanggal & kegiatan';
+  $('#navReview').hidden = verify;
+  document.querySelectorAll('.workflow-nav [data-step-indicator]').forEach(button => {
+    if (Number(button.dataset.stepIndicator) === step) button.setAttribute('aria-current', 'step');
+    else button.removeAttribute('aria-current');
+  });
   document.querySelectorAll('.workflow-step[data-step]').forEach(node => {
     const n = Number(node.dataset.step);
     node.classList.toggle('is-active', n === step);
@@ -262,8 +312,6 @@ async function completeLoginFlow(employeeId) {
       renderLoginFlow();
       const loginBadge = $('#loginBadge');
       if (loginBadge) loginBadge.textContent = 'Login aktif';
-      const nextBtn = $('#loginNextBtn');
-      if (nextBtn) nextBtn.hidden = false;
       setWizardStep(2);
     }
     log('Login terverifikasi. Sesi aktif.');
@@ -311,18 +359,24 @@ function renderLoginCompletion(result) {
   if (staged) renderPersonalDiff(staged);
 }
 
-function selectEmployee(employee) {
+function selectEmployee(employee, authenticated = false) {
+  const changing = active && active.id !== employee.id;
+  if (changing && !authenticated && !confirmAccountChange()) return;
+  if (changing) { updateCalendarSelection(null, null); editDayState.clear(); $('#wizardVerificationMessage').value = ''; }
+  if (active?.id === employee.id && !authenticated) { $('#accountSwitcher').open = false; setWizardStep(2); return; }
+  verificationScanned = false;
   stopLoginPolling();
   active = employee;
+  localStorage.setItem('lastAccountId', employee.id);
+  $('#accountSwitcher').open = false;
+  document.querySelectorAll('[name="workflowMode"]').forEach(input => { input.checked = false; });
   currentPreview = null;
   currentReport = null;
   personalStage = null;
-  setWizardStep(2);
-  const satker = employee?.satker || '';
-  const select = $('#satkerSelect');
-  if (select) select.textContent = satker || 'Terisi otomatis setelah login SSO';
-  const picker=$('#profilePicker');
-  if(picker){picker.hidden=employees.length===0;picker.innerHTML=employees.map(item=>`<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)} · ${escapeHtml(item.nip||item.id)} · Atasan: ${escapeHtml(item.supervisor?.name||item.supervisor?.nip||'Belum terbaca')}</option>`).join('');picker.value=employee.id;}
+  verificationTargets = []; verificationStageToken = null;
+  $('#wizardVerificationPreview').innerHTML = '<p>Pilih Pindai Ulang untuk membaca LLK anggota dari profil ini.</p>';
+  $('#wizardVerificationCount').textContent = 'Periksa LLK anggota dari profil aktif.';
+  setWizardStep(1);
 
   renderEmployeeList();
 
@@ -333,22 +387,13 @@ function selectEmployee(employee) {
   if (titleNode) titleNode.textContent = employee.name;
 
   const positionNode = $('#profilePosition');
-  if (positionNode) positionNode.textContent = `${employee.position}${employee.satker && employee.satker !== 'Satker Lain' ? ` · ${employee.satker}` : ' · Satker belum terdeteksi dari LLK'}`;
+  if (positionNode) positionNode.textContent = employee.position || '';
 
   const activeNameNode = $('#activeProfileName');
   if (activeNameNode) activeNameNode.textContent = `${employee.name} (${employee.nip || employee.id})`;
 
-  const loginBadge = $('#loginBadge');
-  if (loginBadge) loginBadge.textContent = loginFlows.get(employee.id) === 'review' ? 'Logged in' : 'Memeriksa sesi…';
-  api(`/api/employees/${employee.id}/session/status`).then(status => {
-    if (active?.id !== employee.id) return;
-    if (status.authenticated) loginFlows.set(employee.id, 'review');
-    else if (loginFlows.get(employee.id) === 'review') loginFlows.delete(employee.id);
-    if (loginBadge) loginBadge.textContent = status.authenticated ? 'Logged in' : 'Belum masuk';
-    renderLoginFlow();
-  }).catch(() => {
-    if (active?.id === employee.id && loginBadge) loginBadge.textContent = 'Status sesi tidak tersedia';
-  });
+  if (authenticated) { loginFlows.set(employee.id, 'review'); renderLoginFlow(); }
+  else checkAccountSession();
 
 
   const previewArea = $('#previewArea');
@@ -510,6 +555,8 @@ function renderPreview(preview) {
               </table>
             </div>
           ` : `
+            <details class="day-details"${preview.length === 1 ? ' open' : ''}>
+            <summary>${day.items.length} kegiatan · Lihat rincian isian</summary>
             <ul class="day-summary-list">
               ${day.items.map(item => `
                 <li class="day-summary-item">
@@ -519,6 +566,7 @@ function renderPreview(preview) {
                 </li>
               `).join('')}
             </ul>
+            </details>
           `}
         </article>
       `;
@@ -540,6 +588,7 @@ function renderReport(report) {
   const reportArea = $('#reportArea');
   if (!reportArea) return;
   reportArea.hidden = false;
+  $('#previewArea').hidden = true;
 
   const results = report.results || report.dates || [];
   const counts = results.reduce((acc, r) => {
@@ -570,7 +619,7 @@ function renderReport(report) {
           <strong>${escapeHtml(row.date)}</strong>
           <span class="tag-badge">${escapeHtml(row.statusLabel || (row.submitted || row.verified ? 'Tersimpan di LLK' : row.skipped ? 'Sudah ada' : 'Gagal'))}</span>
         </div>
-        <p class="result-message">${escapeHtml(row.message || row.error || 'Tersimpan ke sistem LLK (menunggu verifikasi atasan).')}</p>
+        ${row.error ? `<p class="result-message">Pengiriman belum berhasil. Periksa detail sebelum mencoba kembali.</p><details class="error-details"><summary>Detail teknis</summary><pre>${escapeHtml(row.error)}</pre></details>` : `<p class="result-message">${escapeHtml(row.message || 'Tersimpan ke sistem LLK (menunggu verifikasi atasan).')}</p>`}
       </div>
     `).join('') : '<p class="field-help">Belum ada rincian laporan.</p>';
   }
@@ -668,20 +717,26 @@ function renderCalendar() {
   const lastDay = new Date(year,month+1,0).getDate();
   const today = isoDate(new Date());
   const cells = Array.from({length:firstWeekday},()=>'<span class="calendar-empty"></span>');
-  let excluded = 0;
+  let excluded = 0, workdays = 0;
+  if (calendarSelection.start) {
+    const end = calendarSelection.end || calendarSelection.start;
+    for (let date = parseIsoDate(calendarSelection.start); isoDate(date) <= end; date.setDate(date.getDate() + 1)) {
+      if ([0, 6].includes(date.getDay()) || calendarDays.has(isoDate(date)) || isoDate(date) > today) excluded++;
+      else workdays++;
+    }
+  }
   for (let day=1; day<=lastDay; day++) {
     const date = new Date(year,month,day), iso = isoDate(date), weekday = date.getDay();
     const official = calendarDays.get(iso), weekend = weekday===0 || weekday===6;
     const disabled = iso > today || weekend || Boolean(official);
     const selected = calendarSelection.start && iso>=calendarSelection.start && iso<=(calendarSelection.end||calendarSelection.start);
-    if (selected && disabled) excluded++;
     const type = official?.type || (weekend ? 'weekend' : 'workday');
     const title = official?.label || (weekend ? (weekday===6?'Sabtu':'Minggu') : 'Hari kerja');
     cells.push(`<button type="button" class="calendar-day is-${type}${selected?' is-selected':''}${iso===calendarSelection.start?' is-start':''}${iso===calendarSelection.end?' is-end':''}" data-calendar-date="${iso}" ${disabled?'disabled':''} aria-label="${escapeHtml(`${day} ${title}${selected?', dipilih':''}`)}"><strong>${day}</strong>${official?`<small>${official.type==='collective'?'Cuti':'Libur'}</small>`:weekend?'<small>Libur</small>':''}</button>`);
   }
   grid.innerHTML = cells.join('');
   const summary = $('#calendarSummary');
-  if (summary) summary.textContent = calendarSelection.start ? `${formatIndonesianDate(calendarSelection.start)} – ${formatIndonesianDate(calendarSelection.end)}${excluded ? ` · ${excluded} hari nonkerja otomatis dilewati` : ''}` : 'Pilih tanggal mulai dan selesai.';
+  if (summary) summary.textContent = calendarSelection.start ? `${workdays} hari kerja dipilih · ${excluded} hari dilewati (nonkerja atau belum lewat). Periksa rincian pada pratinjau sebelum kirim.` : 'Pilih tanggal mulai, lalu tanggal selesai.';
   $('#calendarPrevBtn').disabled = year===2026 && month===0;
   $('#calendarNextBtn').disabled = year===2026 && month===11;
 }
@@ -716,21 +771,22 @@ $('#calendarNextBtn')?.addEventListener('click',()=>{calendarMonth=new Date(2026
 
 // Event Listeners
 function setNewProfileMode(open) {
-  const form = $('#employeeForm'), chip = $('.profile-chip'), picker = $('#profilePicker'), button = $('#newEmployee'), workspace = $('#workspace');
+  const form = $('#employeeForm'), chip = $('.profile-chip'), button = $('#newEmployee'), workspace = $('#workspace');
+  if (open && active && !confirmAccountChange()) return;
+  if (open) $('#accountSwitcher').open = true;
   if (!form) return;
   form.hidden = !open;
   if (chip) chip.hidden = open;
-  if (picker) picker.hidden = open || !employees.length;
   if (workspace) workspace.hidden = open || !active;
-  if (button) { button.textContent = open ? 'Batal' : 'Tambah profil'; button.classList.toggle('btn-outline', open); button.classList.toggle('btn-primary', !open); }
+  if (button) { button.textContent = open ? 'Kembali ke akun tersimpan' : 'Masuk dengan akun lain'; }
   if (open) {
     form.reset();
     $('#quickSsoLoginBtn').hidden = false;
     $('#quickSsoFetchBtn').hidden = true;
-    $('#satkerSelect').textContent = 'Terisi setelah login SSO';
+    $('#satkerSelect').hidden = true;
     form.elements.supervisorNip?.focus();
   } else if (active) selectEmployee(active);
-  else $('#satkerSelect').textContent = 'Satker lainnya';
+  else $('#satkerSelect').hidden = true;
 }
 
 function openEmployeeForm() {
@@ -741,7 +797,8 @@ $('#newEmployee')?.addEventListener('click', openEmployeeForm);
 
 function verificationList(items, state = 'ready') {
   if (!items.length) return '';
-  return `<ol class="verification-list">${items.map((item, index) => {
+  const ordered = state === 'ready' ? items : [...items].sort((a, b) => Number(Boolean(a.success)) - Number(Boolean(b.success)));
+  return `<ol class="verification-list">${ordered.map((item, index) => {
     const ready = state === 'ready' ? item.valid !== false : item.success;
     const label = state === 'ready' ? (ready ? 'Siap' : 'Ditahan') : (ready ? 'Berhasil' : 'Gagal');
     const fallback = state === 'ready' ? (item.issues?.join('; ') || item.summary) : (item.error || (ready ? 'Berhasil diproses.' : `HTTP ${item.status || '—'}`));
@@ -749,7 +806,10 @@ function verificationList(items, state = 'ready') {
     const employee = String(item.employeeName || (summary.match(/^\s*\d+\s+(.+?),\s*Tanggal Kegiatan\s*:/i) || [])[1] || '').trim();
     const activities = Array.isArray(item.activities) ? item.activities.filter(activity => activity.start || activity.end || activity.description) : [];
     const schedule = activities.length ? `<ul class="verification-schedule">${activities.map(activity => `<li><time>${escapeHtml(`${activity.start || '—'}–${activity.end || '—'}`)}</time><span>${escapeHtml(activity.description || 'Kegiatan tidak terbaca')}</span><small>${escapeHtml(activity.type || '')}</small></li>`).join('')}</ul>` : `<p class="verification-detail">${escapeHtml(fallback || 'Rincian LLK tidak tersedia.')}</p>`;
-    return `<li class="verification-item verification-item--${ready ? 'ready' : 'failed'}"><span class="verification-number">${index + 1}</span><div class="verification-item-body"><div class="verification-item-head"><div><strong>${escapeHtml(item.date || item.hllk || 'Target tanpa tanggal')}</strong>${employee ? `<span class="verification-employee">${escapeHtml(employee)}</span>` : ''}</div><span class="verification-status">${label}</span></div>${state === 'ready' && item.hllk ? `<code class="verification-id">ID LLK ${escapeHtml(item.hllk)}</code>` : ''}${schedule}</div></li>`;
+    const detail = state === 'ready'
+      ? `<details class="verification-details"><summary>${activities.length ? `${activities.length} kegiatan · Lihat rincian` : 'Lihat rincian LLK'}</summary>${item.hllk ? `<code class="verification-id">ID LLK ${escapeHtml(item.hllk)}</code>` : ''}${schedule}</details>${!ready ? `<p>${escapeHtml(item.issues?.join('; ') || 'Data belum lengkap. Periksa rincian LLK.')}</p>` : ''}`
+      : ready ? '<p class="verification-detail">Status Terverifikasi sudah dikonfirmasi dari LLK.</p>' : `<p class="verification-detail">Verifikasi belum berhasil dikonfirmasi. Pindai ulang untuk memeriksa status terbaru.</p><details class="error-details"><summary>Detail teknis</summary><pre>${escapeHtml(fallback)}</pre></details>`;
+    return `<li class="verification-item verification-item--${ready ? 'ready' : 'failed'}"><span class="verification-number">${index + 1}</span><div class="verification-item-body"><div class="verification-item-head"><div><strong>${escapeHtml(item.date || item.hllk || 'Target tanpa tanggal')}</strong>${employee ? `<span class="verification-employee">${escapeHtml(employee)}</span>` : ''}</div><span class="verification-status">${label}</span></div>${detail}</div></li>`;
   }).join('')}</ol>`;
 }
 function verificationRecovery(error) {
@@ -762,14 +822,20 @@ function verificationRecovery(error) {
 async function refreshWizardVerification() {
   if (!active) return;
   try {
+    $('#wizardVerificationMessage').closest('.form-group').hidden = false;
+    $('#runWizardVerificationBtn').hidden = false;
+    $('#refreshWizardVerificationBtn').textContent = 'Pindai Ulang';
+    $('#wizardVerificationCount').textContent = 'Memindai LLK anggota…';
     const result = await api(`/api/verification/preview?employeeId=${encodeURIComponent(active.id)}`);
     verificationTargets = (result.targets || []).filter(item => item.valid !== false); verificationStageToken = result.stageToken || null;
+    verificationScanned = true;
     const count = $('#wizardVerificationCount');
     if (count) count.textContent = `${result.validCount ?? verificationTargets.length} LLK siap diverifikasi · filter Belum Terverifikasi berdasarkan NIP terbukti aktif`;
     const preview = $('#wizardVerificationPreview');
     const held = Array.isArray(result.invalidTargets) ? result.invalidTargets : [];
     if (preview) preview.innerHTML = `<section class="verification-command"><div class="verification-filter verification-filter--active"><span>Filter aktif</span><strong>Belum Terverifikasi</strong><span>berdasarkan NIP</span></div>${verificationTargets.length ? `<div class="verification-summary"><strong>${verificationTargets.length}</strong><span>LLK siap diverifikasi</span></div>${verificationList(verificationTargets)}` : '<p class="verification-empty">Tidak ada LLK anggota berstatus Belum Terverifikasi.</p>'}${held.length ? `<div class="verification-held"><strong>${held.length} LLK ditahan</strong><span>Belum lolos pemeriksaan sebelum verifikasi.</span></div>${verificationList(held)}` : ''}</section>`;
     $('#runWizardVerificationBtn').disabled = !verificationTargets.length;
+    $('#runWizardVerificationBtn').textContent = `Verifikasi ${verificationTargets.length} LLK siap`;
   } catch (error) {
     verificationTargets = []; verificationStageToken = null;
     $('#runWizardVerificationBtn').disabled = true;
@@ -779,20 +845,27 @@ async function refreshWizardVerification() {
   }
 }
 
-document.querySelectorAll('[name="workflowMode"]').forEach(input => input.addEventListener('change', () => {const verify = document.querySelector('[name="workflowMode"]:checked')?.value === 'verify';$('#createLlkMode').hidden = verify;$('#verifyLlkMode').hidden = !verify;if (verify) runBusy(refreshWizardVerification, 'Pindai LLK Anggota');}));
+document.querySelectorAll('[name="workflowMode"]').forEach(input => input.addEventListener('change', () => {
+  const verify = input.value === 'verify';
+  setWizardStep(!verify && (currentPreview || currentReport) ? 3 : 2);
+  if (verify && !verificationScanned && active && loginFlows.get(active.id) === 'review') runBusy(refreshWizardVerification, 'Pindai LLK Anggota');
+}));
 $('#refreshWizardVerificationBtn')?.addEventListener('click', () => runBusy(refreshWizardVerification, 'Pindai LLK Anggota'));
 $('#runWizardVerificationBtn')?.addEventListener('click', () => active && runBusy(async () => {
   const message = String($('#wizardVerificationMessage')?.value || '').trim();
   if (!message) throw new Error('Isi pesan verifikasi terlebih dahulu');
   if (!verificationTargets.length || !verificationStageToken) throw new Error('Pindai ulang sebelum verifikasi');
-  const result = await api('/api/verification/run', {method: 'POST',body: JSON.stringify({ employeeId: active.id, message, stageToken: verificationStageToken, hllk: verificationTargets.map(item => item.hllk) })});
+  const targets = verificationTargets;
+  const result = await api('/api/verification/run', {method: 'POST',body: JSON.stringify({ employeeId: active.id, message, stageToken: verificationStageToken, hllk: targets.map(item => item.hllk) })});
   verificationTargets = []; verificationStageToken = null;
-  const failures=result.results.filter(item=>!item.success);
   log(`Verifikasi anggota selesai: ${result.success}/${result.total} berhasil.`);
-  feedback(`${result.success} LLK anggota berhasil diverifikasi${result.failed ? `; ${result.failed} gagal: ${failures.map(item=>`${item.date||item.hllk} (${item.error||`HTTP ${item.status}`})`).join('; ')}` : ''}.`,Boolean(result.failed));
+  feedback(`${result.success} LLK berhasil diverifikasi · ${result.failed || 0} gagal.${result.failed ? ' Periksa detail hasil, lalu pindai ulang sisa target.' : ''}`, Boolean(result.failed));
   $('#wizardVerificationCount').textContent=`${result.success}/${result.total} selesai${result.failed?`; ${result.failed} gagal`:''}. Pindai ulang hanya jika ingin melihat sisa target.`;
-  $('#wizardVerificationPreview').innerHTML=`<p class="verification-result-summary"><strong>Verifikasi selesai tanpa memindai ulang filter.</strong></p>${verificationList(result.results, 'result')}`;
+  $('#wizardVerificationPreview').innerHTML=`<p class="verification-result-summary"><strong>${result.success} berhasil · ${result.failed || 0} gagal</strong><br>Pindai ulang untuk memeriksa status terbaru. Tidak ada pengiriman ulang otomatis.</p>${verificationList(result.results.map(row => ({...targets.find(target => target.hllk === row.hllk), ...row})), 'result')}`;
   $('#runWizardVerificationBtn').disabled=true;
+  $('#wizardVerificationMessage').closest('.form-group').hidden = true;
+  $('#runWizardVerificationBtn').hidden = true;
+  $('#refreshWizardVerificationBtn').textContent = 'Pindai sisa LLK';
 }, 'Verifikasi LLK Anggota'));
 async function fetchBootstrapProfile() {
   if (!bootstrapFlow) throw new Error('Sesi bootstrap tidak aktif. Klik Buka ulang SSO untuk membuat sesi login baru.');
@@ -805,11 +878,9 @@ async function fetchBootstrapProfile() {
     bootstrapFlow = null;
     setNewProfileMode(false);
     loginFlows.set(out.employee.id, 'review');
-    selectEmployee(out.employee);
+    selectEmployee(out.employee, true);
     const loginBadge = $('#loginBadge');
-    if (loginBadge) loginBadge.textContent = 'Logged in';
-    const loginNextBtn = $('#loginNextBtn');
-    if (loginNextBtn) loginNextBtn.hidden = false;
+    if (loginBadge) loginBadge.textContent = 'Sesi aktif';
     setWizardStep(2);
     await loadEmployees();
     const templateCount = out.history?.candidate?.activities?.length || out.history?.activities?.length || 0;
@@ -860,7 +931,6 @@ $('#quickSsoRestartBtn')?.addEventListener('click', () => {
 });
 
 $('#quickSsoFetchBtn')?.addEventListener('click', () => runBusy(fetchBootstrapProfile, 'Tarik Data Akun'));
-$('#profilePicker')?.addEventListener('change', event => {const employee=employees.find(item=>item.id===event.target.value);if(employee)selectEmployee(employee);});
 
 
 $('#employeeList')?.addEventListener('click', event => {
@@ -1026,11 +1096,19 @@ $('#applyPersonalTemplateBtn')?.addEventListener('click', () => active && runBus
   log(`Daftar kegiatan halaman LLK untuk ${active.name} aktif.`);
   syncControls();
 }, 'Terapkan Daftar Kegiatan'));
+$('#retrySessionBtn').addEventListener('click', checkAccountSession);
+$('#openAccountBrowserBtn').addEventListener('click', () => active && runBusy(async () => {
+  await api(`/api/employees/${active.id}/login`, { method: 'POST', body: '{}' });
+  feedback('Jendela LLK dibuka. Sesi aplikasi tetap tersedia.');
+}, 'Buka LLK di browser'));
 
-$('#loginNextBtn')?.addEventListener('click', () => {
+function confirmAccountChange() {
+  return !(currentPreview && !currentReport || calendarSelection.start || $('#wizardVerificationMessage').value.trim()) || window.confirm('Ganti akun akan menghapus draf tanggal, isian, dan pesan yang belum dikirim. Lanjutkan?');
+}
+document.querySelectorAll('[data-change-work]').forEach(button => button.addEventListener('click', () => {
+  document.querySelectorAll('[name="workflowMode"]').forEach(input => { input.checked = false; });
   setWizardStep(2);
-  refreshWizardVerification().catch(error => log(`Pemindaian verifikasi belum tersedia: ${error.message}`));
-});
+}));
 document.querySelectorAll('[data-go-step]').forEach(btn => {
   btn.addEventListener('click', () => setWizardStep(Number(btn.dataset.goStep)));
 });

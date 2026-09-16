@@ -30,6 +30,8 @@ Pertama kali:
 2. Login SSO pada jendela Edge yang muncul.
 3. Kembali ke aplikasi, klik **Saya sudah login** — selesai. Sesi berikutnya tidak perlu login ulang selama cookie belum kedaluwarsa.
 
+Jendela SSO tidak ditutup otomatis setelah login; hanya diminimalkan agar bisa diperiksa kembali lewat taskbar. Tutup manual jika selesai. Menghentikan atau me-restart agent tetap menutup browser yang dikelolanya.
+
 ## Privasi & data
 
 Semua data runtime — cookie sesi SSO, profil browser, daftar pegawai — hanya ada di folder lokal `llk-agent/data/` dan `llk-agent/profiles/`. Folder itu sudah diabaikan Git dan **tidak pernah** dikirim ke mana pun selain situs resmi LLK. Jangan pernah membagikan atau meng-commit isinya.

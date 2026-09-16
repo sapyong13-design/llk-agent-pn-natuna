@@ -63,10 +63,10 @@ components:
 
 LLK Agent terlihat seperti dokumen dinas yang hidup, bukan dashboard SaaS. Dunia visual berasal dari security printing dokumen resmi Indonesia: kertas terang, tinta biru-hitam, kop naskah, guilloche, microtext, perforasi, dan stempel merah sebagai bahasa status.
 
-Antarmuka padat tetapi terdaftar rapi. Pengguna selalu melihat posisi pada alur tiga lembar: masuk SSO, pilih tanggal, periksa & kirim. Identitas resmi tetap manusiawi lewat judul berkarakter, humor footer, dan gerak stempel yang hanya muncul saat berhasil.
+Antarmuka operasional dengan dua pilihan utama: Buat LLK dan Verifikasi LLK Anggota. Navigasi ringkas menunjukkan tahap aktif; hanya satu panel kerja tampil. Header memuat profil dan akses SSO. Identitas dokumen tetap, dekorasi tidak mengambil ruang tugas.
 
 **Key Characteristics:**
-- Lembar kerja bertumpuk, garis registrasi, dan kode formulir.
+- Satu lembar kerja aktif, navigasi tahap ringkas, dan header profil.
 - Satu aksen merah stempel; biru resmi bertindak sebagai tinta struktural.
 - Angka tanggal, waktu, dan NIP selalu tabular.
 - Mode gelap otomatis mempertahankan metafora dokumen untuk pemakaian malam.
@@ -100,14 +100,14 @@ Palet restrained: netral kertas + tinta biru-hitam + satu aksen status merah.
 
 Marcellus memberi rasa ukiran dokumen tanpa menjadi nostalgia dekoratif. Public Sans menjaga operasi padat tetap jelas. JetBrains Mono hanya untuk data yang perlu sejajar: tanggal, waktu, NIP, kode form, microtext.
 
-- **Display:** 400, `clamp(40px, 6vw, 72px)`, line-height .92.
-- **Step heading:** 400, `clamp(23px, 3vw, 34px)`, line-height 1.08.
-- **Body:** 400, 14px/1.58; penjelasan dibatasi sekitar 72 karakter.
-- **Label:** 600, 9–10px mono, uppercase, tracking .1–.14em.
+- **Display:** Marcellus 32–36px, header ringkas.
+- **Step heading:** Marcellus 26–28px.
+- **Body:** Public Sans 14–15px; penjelasan dibatasi sekitar 72 karakter.
+- **Label:** Public Sans 12–13px; angka tetap tabular.
 
 ## Layout
 
-Kontainer maksimum 1180px. Header memakai kop naskah dua kolom; di bawah 760px berubah menjadi satu kolom. Workflow adalah tiga lembar terdaftar: lembar aktif naik dengan bayangan ambient dan pita merah tipis; lembar pasif merapat seperti arsip di bawahnya.
+Kontainer maksimum 1180px. Header dua kolom menjadi satu kolom pada layar kecil. Kalender dan ringkasan berdampingan di desktop, bertumpuk di seluler. Pilihan pekerjaan berada di atas navigasi tahap. Daftar kegiatan dan detail error memakai disclosure native; tombol kirim tetap terjangkau tanpa menutupi isian.
 
 Kalender mempertahankan tujuh kolom pada semua ukuran. Pada 390px, tanggal mengecil tetapi struktur tidak berubah. Mode/source options menjadi satu kolom di bawah 760px. Pada 414px, rentang tanggal, ringkasan, dan daftar aktivitas menjadi satu kolom.
 
@@ -121,8 +121,8 @@ Sudut dokumen dan kontrol hampir selalu persegi (`0–2px`). Lingkaran hanya unt
 
 ## Components
 
-- **Header/kop:** kode form, judul Marcellus, pita tanda merah-biru, microtext, watermark PN.
-- **Workflow sheet:** kode `FORM LLK-0N`, nomor berbentuk cap, pita merah 3px pada lembar aktif.
+- **Header/kop:** judul Marcellus ringkas, satker, profil aktif, pilihan profil, Sesi SSO, tambah profil, tema.
+- **Workflow sheet:** satu panel aktif tanpa lembar pasif bertumpuk; tahap aktif ditandai pada navigasi.
 - **Buttons:** persegi, biru untuk utilitas, merah untuk tindakan utama/destruktif; fokus 3px merah dengan offset 3px.
 - **Calendar:** header biru tua, sel terdaftar, tanggal mono; awal/akhir rentang memakai merah penuh.
 - **Status:** label mono, uppercase, sedikit berotasi seperti cap. Sukses menerima satu animasi `stamp-land`; hormati `prefers-reduced-motion`.
@@ -131,7 +131,7 @@ Sudut dokumen dan kontrol hampir selalu persegi (`0–2px`). Lingkaran hanya unt
 
 ## Do's and Don'ts
 
-- **Do** pertahankan alur tiga langkah dan istilah resmi LLK, Satker, SSO, atasan langsung.
+- **Do** pertahankan seluruh fitur, konfirmasi wajib, dan istilah resmi LLK, Satker, SSO, atasan langsung; pisahkan alur buat dan verifikasi.
 - **Do** gunakan geometri identik untuk kartu hari agar mudah dibandingkan.
 - **Do** gunakan warna dan gerak untuk keadaan yang nyata.
 - **Do** self-host aset; aplikasi lokal tidak boleh meminta aset visual dari pihak ketiga.

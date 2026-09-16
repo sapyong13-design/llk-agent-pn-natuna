@@ -17,7 +17,7 @@ function run(command, args) {
 function openApp() {
   const url = `http://127.0.0.1:${port}`;
   const [command, args] = process.platform === 'win32'
-    ? [process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `start "" "${url}"`]]
+    ? ['explorer.exe', [url]]
     : process.platform === 'darwin' ? ['open', [url]] : ['xdg-open', [url]];
   const opener = setTimeout(() => {
     const child = spawn(command, args, { detached: true, stdio: 'ignore' });

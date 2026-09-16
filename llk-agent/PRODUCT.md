@@ -26,7 +26,8 @@ Agent lokal yang memakai sesi browser asli pegawai (profil Edge terpisah per peg
 
 ## Capabilities and Constraints
 
-- Alur kerja 3 langkah terkunci (keputusan pengguna, jangan diubah): (1) login SSO, (2) pilih tanggal, (3) review & kirim. Istilah/label resmi ikut terkunci.
+- Workflow boleh dirapikan; fitur dan aturan tetap (persetujuan pengguna 15 September 2026). Dua pilihan utama: Buat LLK dan Verifikasi LLK Anggota. Sesi SSO tersedia dari header; satu tahap kerja tampil. Buat LLK tetap melalui tanggal, pratinjau/edit, dan konfirmasi kirim. Verifikasi melalui daftar, pesan, tindakan, dan hasil. Istilah resmi tetap.
+- Pintu masuk memakai akun terakhir pada browser lokal. Sesi aktif langsung menampilkan pilihan pekerjaan tanpa tombol Lanjut; kedaluwarsa meminta login; error pemeriksaan menawarkan coba lagi. Pemilih akun berpencarian menjadi satu akses akun. Ganti pekerjaan mempertahankan draf, sedangkan pergantian akun meminta konfirmasi dan menghapus konteks draf sebelumnya. Tahap tampil sebagai indikator, bukan tombol navigasi duplikat. Hasil menggantikan formulir tindakan; tombol verifikasi menyebut jumlah LLK siap.
 - Profil per pegawai = konteks browser terpisah; nama, satker, atasan dibaca otomatis dari akun SSO.
 - Sumber kegiatan: kegiatan unik dari halaman terakhir akun, atau template umum per bagian pengadilan.
 - Verifikasi LLK anggota & kirim dari dalam aplikasi; log & laporan lokal (JSON, bisa diekspor).

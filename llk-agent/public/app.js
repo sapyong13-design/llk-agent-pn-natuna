@@ -1,9 +1,7 @@
-let employees = [], templates = {}, active = null, currentPreview = null, currentReport = null, personalStage = null, verificationStageToken = null, busy = false;
-const loginFlows = new Map();
-let bootstrapFlow = sessionStorage.getItem('bootstrapFlow');
+let templates = {}, active = null, currentPreview = null, currentReport = null, personalStage = null, verificationStageToken = null, busy = false;
+let bootstrapFlow = null, onboardingState = 'checking', sessionPollGeneration = 0;
 let verificationTargets = [];
-let verificationScanned = false;
-let loginPollTimer = null;
+let sessionPollTimer = null;
 const editDayState = new Set();
 let calendarDays = new Map();
 let calendarMonth = new Date(2026, new Date().getMonth(), 1);
@@ -27,33 +25,25 @@ function feedback(message = '', isError = false) {
   node.className = `inline-feedback ${isError ? 'is-error' : ''}`;
 }
 
-function updateWorkbenchStatus(step) {
-  const copy = {
-    1: ['Masuk ke LLK', 'Buka SSO pada jendela Edge yang muncul.', 'Selesaikan login di Edge, lalu kembali ke sini.'],
-    2: ['Pilih tanggal LLK', 'Pilih rentang hari kerja yang ingin diisi.', 'Hari libur dan akhir pekan tidak akan dibuatkan LLK.'],
-    3: ['Periksa & kirim', 'Periksa kegiatan, waktu, dan atasan sebelum mengirim.', 'Edit hanya bila isian tidak sesuai pekerjaan nyata.']
-  };
-  const [title, detail, hint] = copy[step] || copy[1];
-  const number = $('#currentStepNumber'), titleNode = $('#currentStepTitle'), detailNode = $('#currentStepDetail'), hintNode = $('#currentStepHint');
-  if (number) number.textContent = step;
-  if (titleNode) titleNode.textContent = title;
-  if (detailNode) detailNode.textContent = detail;
-  if (hintNode) hintNode.textContent = hint;
-}
 
-function log(message) {
+function log(message, status = 'Info') {
   const box = $('#logBox');
   if (!box) return;
+  const follow = box.scrollHeight - box.scrollTop - box.clientHeight < 24;
+  const safe = String(message).replace(/([?&](?:token|_token|access_token|code|state|secret|password)=)[^&\s]*/gi, '$1[disembunyikan]').replace(/((?:cookie|authorization|password|secret|csrf|token)\s*[:=]\s*)[^\r\n]+/gi, '$1[disembunyikan]');
   const stamp = new Date().toLocaleTimeString('id-ID', { hour12: false });
-  const entry = `[${stamp}] ${message}`;
-  const latest = $('#logLatest'); if (latest) latest.textContent = message;
-  if (!box.dataset.touched) {
-    box.dataset.touched = 'true';
-    box.textContent = entry;
-    return;
+  if (!box.dataset.touched) { box.textContent = ''; box.dataset.touched = 'true'; }
+  const entry = document.createElement('div');
+  entry.className = 'log-entry';
+  for (const [className, text] of [['log-time', stamp], [`log-status log-status--${String(status).toLowerCase()}`, status], ['log-message', safe]]) {
+    const cell = document.createElement('span');
+    cell.className = className;
+    cell.textContent = text;
+    entry.append(cell, document.createTextNode(' '));
   }
-  const lines = [entry, ...box.textContent.split('\n')].filter(Boolean).slice(0, 30);
-  box.textContent = lines.join('\n');
+  box.append(entry);
+  $('#logLatest').textContent = safe;
+  if (follow) box.scrollTop = box.scrollHeight;
 }
 
 function setBusy(value) {
@@ -69,28 +59,22 @@ function syncControls() {
     control.disabled = busy;
   });
 
-  const flow = active && loginFlows.get(active.id);
-  const loginBtn = $('#loginBtn');
-  const completeLoginBtn = $('#completeLoginBtn');
-  const cancelLoginBtn = $('#cancelLoginBtn');
   const submitBtn = $('#submitBtn');
   const applyPersonalTemplateBtn = $('#applyPersonalTemplateBtn');
-  const deleteConfirmBtn = $('#deleteConfirmBtn');
 
-  if (loginBtn) loginBtn.disabled = busy || flow === 'waiting' || flow === 'completing';
-  if (completeLoginBtn) completeLoginBtn.disabled = busy || flow !== 'waiting';
   if (submitBtn) submitBtn.disabled = busy || !currentPreview || !$('#confirmCheck')?.checked;
   const readiness = $('#sendReadiness');
   if (readiness) readiness.textContent = busy ? 'Sedang memproses. Jangan tutup aplikasi.' : !currentPreview ? 'Siapkan isian terlebih dahulu.' : $('#confirmCheck')?.checked ? 'Siap dikirim ke LLK.' : 'Centang konfirmasi untuk mengirim.';
   if (applyPersonalTemplateBtn) applyPersonalTemplateBtn.disabled = busy || !personalStage || !$('#personalStageConfirm')?.checked;
-  if (deleteConfirmBtn) deleteConfirmBtn.disabled = busy || $('#deleteConfirm')?.value !== (active?.id || 'HAPUS');
-  const verify = $('[name="workflowMode"]:checked')?.value === 'verify';
-  if ($('#navReview')) $('#navReview').disabled = busy || verify || (!currentPreview && !currentReport);
   if ($('#runWizardVerificationBtn')) $('#runWizardVerificationBtn').disabled = busy || !verificationTargets.length || !verificationStageToken;
   document.querySelectorAll('[data-calendar-date]').forEach(control => {
     const date = parseIsoDate(control.dataset.calendarDate);
     control.disabled = busy || control.dataset.calendarDate > isoDate(new Date()) || [0, 6].includes(date.getDay()) || calendarDays.has(control.dataset.calendarDate);
   });
+  const onboardingLocked = busy || ['checking', 'waiting', 'completing', 'error'].includes(onboardingState);
+  $('#quickSupervisorNip').disabled = onboardingLocked;
+  $('#quickSsoLoginBtn').disabled = onboardingLocked;
+  $('#quickSsoRetryBtn').disabled = busy || onboardingState !== 'error';
 }
 
 async function api(path, options = {}) {
@@ -107,18 +91,20 @@ async function api(path, options = {}) {
 
 function recoveryMessage(error) {
   const message = String(error?.message || '');
-  if (error?.status === 401 || /sesi.*(?:berakhir|kedaluwarsa)|login.*belum/i.test(message)) return 'Login SSO perlu diperbarui. Buka SSO lagi, selesaikan login di Edge, lalu ulangi langkah ini.';
+  if (error?.status === 401 || /sesi.*(?:berakhir|kedaluwarsa)|login.*belum/i.test(message)) return 'Login SSO perlu diperbarui. Akhiri sesi, lalu login SSO lagi.';
   if (error?.status === 409 || /jadwal|pola|duplikat/i.test(message)) return 'Data LLK perlu diperiksa. Kembali ke langkah sebelumnya, periksa tanggal atau isian, lalu coba lagi.';
   if (/failed to fetch|networkerror|fetch failed/i.test(message)) return 'Aplikasi lokal tidak merespons. Pastikan LLK Agent masih terbuka, lalu muat ulang halaman.';
   return 'Coba ulangi langkah ini. Bila tetap gagal, buka Log teknis dan kirim pesan terakhirnya.';
 }
 
+const progressCursors = new Map();
 async function pollOperationProgress(employeeId,signal){
   if(!employeeId)return;
-  let since=0;
+  let since=progressCursors.get(employeeId)||0;
   while(!signal.aborted){
     try{
       const state=await api(`/api/progress?employeeId=${encodeURIComponent(employeeId)}&since=${since}`);
+      progressCursors.set(employeeId, Math.max(since, state.sequence || 0));
       for(const event of state.events||[]){since=Math.max(since,event.sequence||0);log(`${event.message}${event.page?` (halaman ${event.page})`:''}${event.rowsFound!=null?` · ${event.rowsFound} target`:''}${event.validCount!=null?` · ${event.validCount} siap`:''}${event.invalidCount?` · ${event.invalidCount} ditahan`:''}`);}
     }catch{}
     await new Promise(resolve=>setTimeout(resolve,750));
@@ -129,13 +115,16 @@ async function runBusy(action, operationName = 'Operasi') {
   if (busy) return;
   setBusy(true);
   feedback();
+  log(operationName, 'Berjalan');
   const controller=new AbortController();
   const polling=pollOperationProgress(active?.id,controller.signal);
   try {
-    return await action();
+    const result = await action();
+    log(`${operationName}: proses selesai. Periksa rincian hasil untuk status tiap LLK.`, 'Selesai');
+    return result;
   } catch (error) {
     const msg = `${operationName} gagal: ${error.message}`;
-    log(msg);
+    log(msg, 'Gagal');
     feedback(`${msg} ${recoveryMessage(error)}`, true);
   } finally {
     controller.abort();
@@ -173,236 +162,57 @@ function renderGeneralTemplate(key) {
 
 $('#generalTemplateSelect')?.addEventListener('change', event => renderGeneralTemplate(event.target.value));
 
-function renderEmployeeList() {
-  const query = ($('#employeeSearch')?.value || '').trim().toLowerCase();
-  const list = $('#employeeList');
-  if (!list) return;
-  const filtered = employees.filter(employee => {
-    if (!query) return true;
-    const name = String(employee.name || '').toLowerCase();
-    const nip = String(employee.nip || '').toLowerCase();
-    const pos = String(employee.position || '').toLowerCase();
-    return name.includes(query) || nip.includes(query) || pos.includes(query);
-  });
-
-  list.innerHTML = filtered.length ? filtered.map(employee => `
-    <button type="button" class="emp-item ${active?.id === employee.id ? 'active' : ''}" data-id="${escapeHtml(employee.id)}">
-      <span class="emp-name">${escapeHtml(employee.name)}</span>
-      <span class="emp-pos">${escapeHtml(employee.position)} · NIP ${escapeHtml(employee.nip || '—')}</span>
-    </button>
-  `).join('') : '<p class="emp-pos">Tidak ada profil yang sesuai.</p>';
-}
-
-async function loadEmployees() {
-  employees = await api('/api/employees');
-  renderEmployeeList();
-}
-
 
 async function loadApp() {
   log('Memulai LLK Agent…');
-  await Promise.all([loadTemplates(), loadEmployees(), loadCalendar()]);
-  const initial = employees.find(employee => employee.id === localStorage.getItem('lastAccountId')) || employees[0] || null;
-  const satker = initial?.satker || '';
-  if (initial) selectEmployee(initial);
-  log(`Sistem siap. Satker: ${satker || 'Satker lainnya'}. Profil aktif: ${initial?.name || 'Belum dipilih'}`);
-  if (!employees.length) {
-    setNewProfileMode(true);
-    feedback('Belum ada profil pegawai. Isi NIP atasan langsung, lalu login SSO untuk memulai.');
-  }
-  const bootstrapStatus = await api('/api/bootstrap/status').catch(() => ({ active: [] }));
-  const pendingBootstrap = bootstrapStatus.active?.[0];
-  if (pendingBootstrap) {
-    bootstrapFlow = pendingBootstrap.tempId;
-    sessionStorage.setItem('bootstrapFlow', bootstrapFlow);
-    setNewProfileMode(true);
-    $('#quickSsoLoginBtn').hidden = true;
-    $('#quickSsoFetchBtn').hidden = false;
-    $('#quickSsoRestartBtn').hidden = false;
-    feedback(pendingBootstrap.authenticated
-      ? 'Sesi Edge sudah login. Klik Saya sudah login untuk mengambil profil dan daftar LLK.'
-      : 'Sesi Edge belum login atau sudah berakhir. Klik Buka ulang SSO, selesaikan login, lalu klik Saya sudah login.');
+  onboardingState = 'checking';
+  renderOnboarding();
+  try {
+    await Promise.all([loadTemplates(), loadCalendar()]);
+    await resumeSession();
+  } catch (error) {
+    failOnboarding(error);
   }
 }
-function renderLoginFlow() {
-  const state = (active && loginFlows.get(active.id)) || 'idle';
-  const waiting = state === 'waiting' || state === 'completing';
+function renderSessionIdentity() {
   const satker = String(active?.satker || '').trim();
   $('#satkerSelect').textContent = satker;
-  $('#satkerSelect').hidden = state !== 'review' || !satker || /^satker lain(?:nya)?$/i.test(satker);
-  const loginBtn = $('#loginBtn');
-  const completeLoginBtn = $('#completeLoginBtn');
-  const cancelLoginBtn = $('#cancelLoginBtn');
-  const detail = $('#loginFlowDetail');
-  const stateBadge = $('#authStepState');
-
-  if (loginBtn) { loginBtn.hidden = waiting || ['checking', 'error', 'review'].includes(state); loginBtn.textContent = `Login ulang sebagai ${active?.name || 'akun ini'}`; }
-  $('#retrySessionBtn').hidden = state !== 'error';
-  $('#openAccountBrowserBtn').hidden = state !== 'review';
-  $('#loginFlowTitle').textContent = 'Masuk ke LLK';
-  if (completeLoginBtn) completeLoginBtn.hidden = !waiting;
-  if (cancelLoginBtn) cancelLoginBtn.hidden = !waiting;
-
-  if (detail) {
-    detail.textContent = state === 'waiting'
-      ? 'Jendela Edge terbuka. Selesaikan SSO; aplikasi akan mendeteksi login otomatis.'
-      : state === 'completing'
-        ? 'Login terdeteksi. Memeriksa identitas dan relasi verifikator…'
-        : state === 'review'
-          ? 'Sesi SSO masih aktif. Lanjut tanpa login ulang.'
-          : state === 'checking' ? 'Memeriksa sesi akun tersimpan. Tidak perlu membuka SSO dahulu.'
-          : state === 'error' ? 'Status sesi belum dapat diperiksa. Periksa koneksi lalu coba lagi; ini belum berarti sesi kedaluwarsa.'
-          : 'Data akun tetap tersimpan. Sesi SSO perlu diperbarui sebelum bekerja.';
-  }
-
-  if (stateBadge) {
-    stateBadge.textContent = state === 'waiting' ? 'Menunggu SSO'
-      : state === 'completing' ? 'Memverifikasi'
-      : state === 'review' ? 'Sesi aktif' : state === 'checking' ? 'Memeriksa sesi…' : state === 'error' ? 'Belum dapat diperiksa' : 'Perlu login';
-    $('#loginBadge').textContent = stateBadge.textContent;
-  }
-
-  syncControls();
-}
-function stopLoginPolling() {
-  clearTimeout(loginPollTimer);
-  loginPollTimer = null;
-}
-async function checkAccountSession() {
-  if (!active) return;
-  const id = active.id;
-  loginFlows.set(id, 'checking'); renderLoginFlow();
-  try {
-    const status = await api(`/api/employees/${id}/session/status`);
-    if (active?.id !== id) return;
-    loginFlows.set(id, status.authenticated ? 'review' : 'idle');
-  } catch {
-    if (active?.id !== id) return;
-    loginFlows.set(id, 'error');
-  }
-  renderLoginFlow();
-  setWizardStep(loginFlows.get(active?.id) === 'review' ? 2 : 1);
+  $('#satkerSelect').hidden = !satker || /^satker lain(?:nya)?$/i.test(satker);
+  $('#loginBadge').textContent = active ? 'Sesi aktif' : 'Belum masuk';
 }
 function setWizardStep(step) {
-  if (step !== 1 && loginFlows.get(active?.id) !== 'review') step = 1;
-  const mode = $('[name="workflowMode"]:checked')?.value;
-  $('#workChoices').hidden = step === 1 || Boolean(mode);
-  $('.workflow-nav').hidden = step === 1 || !mode;
-  $('#accountSessionBtn').hidden = step === 1;
+  const signedIn = Boolean(active);
+  if (signedIn && !$('[name="workflowMode"]:checked')) $('[name="workflowMode"][value="create"]').checked = true;
   const verify = $('[name="workflowMode"]:checked')?.value === 'verify';
-  if (step === 3 && (verify || (!currentPreview && !currentReport))) step = 2;
-  $('#createLlkMode').hidden = verify || !mode;
+  $('#workChoices').hidden = !signedIn;
+  $('#createLlkMode').hidden = verify || Boolean(currentReport);
   $('#verifyLlkMode').hidden = !verify;
-  $('#workTitle').textContent = !mode ? 'Apa yang ingin dikerjakan?' : verify ? 'Verifikasi LLK Anggota' : 'Pilih tanggal LLK';
-  $('#workHint').textContent = !mode ? 'Pilih Buat LLK atau Verifikasi LLK Anggota di atas.' : verify ? 'Periksa daftar anggota, isi pesan, lalu verifikasi.' : 'Pilih rentang hari kerja dan sumber kegiatan sebelum meninjau isian.';
-  $('#navWork').textContent = verify ? 'Daftar verifikasi' : 'Tanggal & kegiatan';
-  $('#navReview').hidden = verify;
-  document.querySelectorAll('.workflow-nav [data-step-indicator]').forEach(button => {
-    if (Number(button.dataset.stepIndicator) === step) button.setAttribute('aria-current', 'step');
-    else button.removeAttribute('aria-current');
-  });
-  document.querySelectorAll('.workflow-step[data-step]').forEach(node => {
-    const n = Number(node.dataset.step);
-    node.classList.toggle('is-active', n === step);
-    node.classList.toggle('is-pending', n > step);
-    node.classList.toggle('is-done', n < step);
-  });
-  updateWorkbenchStatus(step);
+  $('#workTitle').textContent = verify ? 'Verifikasi LLK Anggota' : 'Buat LLK';
+  $('#workHint').textContent = verify ? 'Cari LLK anggota, periksa daftar, lalu verifikasi.' : 'Pilih tanggal, siapkan isian, lalu periksa dan kirim di halaman ini.';
+  $('#stepDates').classList.toggle('is-active', signedIn && (verify || !currentReport));
+  $('#reviewStep').classList.toggle('is-active', signedIn && !verify && Boolean(currentPreview || currentReport));
   syncControls();
 }
 
-async function completeLoginFlow(employeeId) {
-  if (loginFlows.get(employeeId) === 'completing') return;
-  loginFlows.set(employeeId, 'completing');
-  if (active?.id === employeeId) renderLoginFlow();
-  log('Login SSO terdeteksi. Memverifikasi akun…');
-  try {
-    const result = await api(`/api/employees/${employeeId}/login/complete`, { method: 'POST', body: '{}' });
-    loginFlows.set(employeeId, 'review');
-    if (result.employee) {
-      const idx = employees.findIndex(e => e.id === result.employee.id);
-      if (idx >= 0) employees[idx] = result.employee;
-      active = result.employee;
-      const titleNode = $('#workspaceTitle');
-      if (titleNode) titleNode.textContent = result.employee.name;
-      const positionNode = $('#profilePosition');
-      if (positionNode) positionNode.textContent = result.employee.position;
-      const activeNameNode = $('#activeProfileName');
-      if (activeNameNode) activeNameNode.textContent = `${result.employee.name} (${result.employee.nip || result.employee.id})`;
-      renderEmployeeList();
-    }
-    if (active?.id === employeeId) {
-      renderLoginCompletion(result);
-      renderLoginFlow();
-      const loginBadge = $('#loginBadge');
-      if (loginBadge) loginBadge.textContent = 'Login aktif';
-      setWizardStep(2);
-    }
-    log('Login terverifikasi. Sesi aktif.');
-  } catch (error) {
-    loginFlows.set(employeeId, 'waiting');
-    if (active?.id === employeeId) renderLoginFlow();
-    throw error;
-  }
-}
 
-function pollLogin(employeeId) {
-  stopLoginPolling();
-  const check = async () => {
-    if (loginFlows.get(employeeId) !== 'waiting') return;
-    try {
-      const status = await api(`/api/employees/${employeeId}/login/status`);
-      if (!status.active) {
-        loginFlows.delete(employeeId);
-        if (active?.id === employeeId) renderLoginFlow();
-        log('Jendela login ditutup atau waktu login berakhir.');
-        return;
-      }
-      if (status.authenticated) {
-        await completeLoginFlow(employeeId);
-        return;
-      }
-    } catch (error) {
-      log(`Pemeriksaan login otomatis tertunda: ${error.message}`);
-    }
-    loginPollTimer = setTimeout(check, 1500);
-  };
-  loginPollTimer = setTimeout(check, 800);
-}
-
-function renderLoginCompletion(result) {
-  const staged = result.history || result.personalTemplateStage || result.personalTemplate || result.stagedPersonalTemplate || result.stage;
-
-
-  const loginCompletionReview = $('#loginCompletionReview');
-  if (loginCompletionReview) {
-    loginCompletionReview.hidden = false;
-    loginCompletionReview.innerHTML = '<strong>Login berhasil diverifikasi</strong><p class="field-help">Sesi siap digunakan untuk menyiapkan dan mengirim LLK.</p>';
-  }
-
-  if (staged) renderPersonalDiff(staged);
-}
-
-function selectEmployee(employee, authenticated = false) {
-  const changing = active && active.id !== employee.id;
-  if (changing && !authenticated && !confirmAccountChange()) return;
-  if (changing) { updateCalendarSelection(null, null); editDayState.clear(); $('#wizardVerificationMessage').value = ''; }
-  if (active?.id === employee.id && !authenticated) { $('#accountSwitcher').open = false; setWizardStep(2); return; }
-  verificationScanned = false;
-  stopLoginPolling();
+function selectEmployee(employee) {
+  stopSessionPolling();
+  bootstrapFlow = null;
+  onboardingState = 'active';
   active = employee;
-  localStorage.setItem('lastAccountId', employee.id);
-  $('#accountSwitcher').open = false;
+  renderOnboarding();
   document.querySelectorAll('[name="workflowMode"]').forEach(input => { input.checked = false; });
   currentPreview = null;
   currentReport = null;
   personalStage = null;
   verificationTargets = []; verificationStageToken = null;
-  $('#wizardVerificationPreview').innerHTML = '<p>Pilih Pindai Ulang untuk membaca LLK anggota dari profil ini.</p>';
-  $('#wizardVerificationCount').textContent = 'Periksa LLK anggota dari profil aktif.';
-  setWizardStep(1);
-
-  renderEmployeeList();
+  $('#wizardVerificationPreview').innerHTML = '<p>Belum ada pemindaian untuk akun ini.</p>';
+  $('#refreshWizardVerificationBtn').textContent = 'Cari LLK anggota';
+  $('#refreshWizardVerificationBtn').classList.add('btn-primary');
+  $('#refreshWizardVerificationBtn').classList.remove('btn-outline');
+  $('#runWizardVerificationBtn').hidden = true;
+  $('#wizardVerificationMessage').closest('.form-group').hidden = true;
+  $('#wizardVerificationCount').textContent = 'Periksa LLK anggota dari sesi aktif.';
 
   const workspace = $('#workspace');
   if (workspace) workspace.hidden = false;
@@ -411,13 +221,8 @@ function selectEmployee(employee, authenticated = false) {
   if (titleNode) titleNode.textContent = employee.name;
 
   const positionNode = $('#profilePosition');
-  if (positionNode) positionNode.textContent = employee.position || '';
+  if (positionNode) positionNode.textContent = [employee.position, employee.nip && `NIP ${employee.nip}`].filter(Boolean).join(' · ');
 
-  const activeNameNode = $('#activeProfileName');
-  if (activeNameNode) activeNameNode.textContent = `${employee.name} (${employee.nip || employee.id})`;
-
-  if (authenticated) { loginFlows.set(employee.id, 'review'); renderLoginFlow(); }
-  else checkAccountSession();
 
 
   const previewArea = $('#previewArea');
@@ -433,18 +238,11 @@ function selectEmployee(employee, authenticated = false) {
   if (confirmCheck) confirmCheck.checked = false;
 
 
-  const delGroup = $('#deleteConfirmGroup');
-  if (delGroup) delGroup.hidden = true;
 
-  const delConfirm = $('#deleteConfirm');
-  if (delConfirm) delConfirm.value = '';
-
-  const delTarget = $('#deleteTargetId');
-  if (delTarget) delTarget.textContent = employee.id;
-
-  renderLoginFlow();
+  renderSessionIdentity();
   loadPersonalTemplate(employee.id).catch(() => {});
   syncControls();
+  setWizardStep(2);
 }
 
 function minutes(time) {
@@ -532,6 +330,8 @@ function updatePreviewStatuses(preview, report = null) {
 
 function renderPreview(preview) {
   currentPreview = preview;
+  currentReport = null;
+  $('#reportArea').hidden = true;
   const previewArea = $('#previewArea');
   if (previewArea) previewArea.hidden = false;
 
@@ -609,6 +409,7 @@ function statusOf(row) {
 
 function renderReport(report) {
   currentReport = report;
+  setWizardStep(2);
   const reportArea = $('#reportArea');
   if (!reportArea) return;
   reportArea.hidden = false;
@@ -649,7 +450,10 @@ function renderPersonalTemplate(info) {
 
 async function loadPersonalTemplate(employeeId) {
   if (!employeeId) return;
-  try { renderPersonalTemplate(await api(`/api/employees/${employeeId}/personal-template`)); }
+  try {
+    const info = await api(`/api/employees/${employeeId}/personal-template`);
+    if (active?.id === employeeId) renderPersonalTemplate(info);
+  }
   catch (error) { log(`Gagal memuat daftar halaman LLK: ${error.message}`); }
 }
 
@@ -709,6 +513,11 @@ async function loadCalendar() {
 }
 
 function updateCalendarSelection(start, end = start) {
+  if (currentPreview && (start !== calendarSelection.start || end !== calendarSelection.end)) {
+    currentPreview = null; currentReport = null; editDayState.clear();
+    $('#previewArea').hidden = true; $('#reportArea').hidden = true; $('#confirmCheck').checked = false;
+    setWizardStep(2);
+  }
   calendarSelection = { start, end };
   const startInput = $('#startDate'), endInput = $('#endDate');
   if (startInput) startInput.value = start || '';
@@ -781,30 +590,6 @@ $('#calendarPrevBtn')?.addEventListener('click',()=>{calendarMonth=new Date(2026
 $('#calendarNextBtn')?.addEventListener('click',()=>{calendarMonth=new Date(2026,calendarMonth.getMonth()+1,1);renderCalendar();});
 
 // Event Listeners
-function setNewProfileMode(open) {
-  const form = $('#employeeForm'), chip = $('.profile-chip'), button = $('#newEmployee'), workspace = $('#workspace');
-  if (open && active && !confirmAccountChange()) return;
-  if (open) $('#accountSwitcher').open = true;
-  if (!form) return;
-  form.hidden = !open;
-  if (chip) chip.hidden = open;
-  if (workspace) workspace.hidden = open || !active;
-  if (button) { button.textContent = open ? 'Kembali ke akun tersimpan' : 'Masuk dengan akun lain'; }
-  if (open) {
-    form.reset();
-    $('#quickSsoLoginBtn').hidden = false;
-    $('#quickSsoFetchBtn').hidden = true;
-    $('#satkerSelect').hidden = true;
-    form.elements.supervisorNip?.focus();
-  } else if (active) selectEmployee(active);
-  else $('#satkerSelect').hidden = true;
-}
-
-function openEmployeeForm() {
-  setNewProfileMode($('#employeeForm')?.hidden !== true ? false : true);
-}
-
-$('#newEmployee')?.addEventListener('click', openEmployeeForm);
 
 function verificationList(items, state = 'ready') {
   if (!items.length) return '';
@@ -826,8 +611,8 @@ function verificationList(items, state = 'ready') {
 function verificationRecovery(error) {
   const loginRequired = error?.status === 401 || /kedaluwarsa|login ulang|sesi .*tidak/i.test(String(error?.message || ''));
   const title = loginRequired ? 'Sesi LLK perlu diperbarui' : 'Pemindaian belum selesai';
-  const instruction = loginRequired ? 'Klik Buka SSO, login dengan profil aktif, pilih Saya sudah login, lalu kembali ke Verifikasi LLK Anggota.' : 'Klik Pindai Ulang. Jika pesan ini muncul lagi, buka SSO dan login ulang untuk membuat sesi baru.';
-  return `<section class="verification-recovery verification-recovery--${loginRequired ? 'login' : 'retry'}" role="alert"><div class="verification-recovery-mark" aria-hidden="true">!</div><div><strong>${title}</strong><p>${escapeHtml(instruction)}</p><button class="btn btn-outline btn-sm" type="button" data-go-step="1">${loginRequired ? 'Buka proses login' : 'Kembali ke login'}</button></div></section>`;
+  const instruction = loginRequired ? 'Klik Akhiri sesi, lalu masukkan NIP atasan langsung dan login SSO kembali.' : 'Klik Pindai Ulang. Jika tetap gagal, periksa Log aktivitas.';
+  return `<section class="verification-recovery verification-recovery--${loginRequired ? 'login' : 'retry'}" role="alert"><div class="verification-recovery-mark" aria-hidden="true">!</div><div><strong>${title}</strong><p>${escapeHtml(instruction)}</p></div></section>`;
 }
 
 async function refreshWizardVerification() {
@@ -839,28 +624,29 @@ async function refreshWizardVerification() {
     $('#wizardVerificationCount').textContent = 'Memindai LLK anggota…';
     const result = await api(`/api/verification/preview?employeeId=${encodeURIComponent(active.id)}`);
     verificationTargets = (result.targets || []).filter(item => item.valid !== false); verificationStageToken = result.stageToken || null;
-    verificationScanned = true;
     const count = $('#wizardVerificationCount');
     if (count) count.textContent = `${result.validCount ?? verificationTargets.length} LLK siap diverifikasi · filter Belum Terverifikasi berdasarkan NIP terbukti aktif`;
     const preview = $('#wizardVerificationPreview');
     const held = Array.isArray(result.invalidTargets) ? result.invalidTargets : [];
     if (preview) preview.innerHTML = `<section class="verification-command"><div class="verification-filter verification-filter--active"><span>Filter aktif</span><strong>Belum Terverifikasi</strong><span>berdasarkan NIP</span></div>${verificationTargets.length ? `<div class="verification-summary"><strong>${verificationTargets.length}</strong><span>LLK siap diverifikasi</span></div>${verificationList(verificationTargets)}` : '<p class="verification-empty">Tidak ada LLK anggota berstatus Belum Terverifikasi.</p>'}${held.length ? `<div class="verification-held"><strong>${held.length} LLK ditahan</strong><span>Belum lolos pemeriksaan sebelum verifikasi.</span></div>${verificationList(held)}` : ''}</section>`;
     $('#runWizardVerificationBtn').disabled = !verificationTargets.length;
-    $('#runWizardVerificationBtn').textContent = `Verifikasi ${verificationTargets.length} LLK siap`;
+    $('#runWizardVerificationBtn').hidden = !verificationTargets.length;
+    $('#wizardVerificationMessage').closest('.form-group').hidden = !verificationTargets.length;
+    $('#runWizardVerificationBtn').textContent = `Verifikasi ${verificationTargets.length} LLK`;
+    $('#refreshWizardVerificationBtn').classList.toggle('btn-primary', !verificationTargets.length);
+    $('#refreshWizardVerificationBtn').classList.toggle('btn-outline', Boolean(verificationTargets.length));
   } catch (error) {
     verificationTargets = []; verificationStageToken = null;
     $('#runWizardVerificationBtn').disabled = true;
+    $('#runWizardVerificationBtn').hidden = true;
+    $('#wizardVerificationMessage').closest('.form-group').hidden = true;
     const count = $('#wizardVerificationCount'); if (count) count.textContent = 'Verifikasi belum dapat dimulai';
     const preview = $('#wizardVerificationPreview'); if (preview) preview.innerHTML = verificationRecovery(error);
     throw error;
   }
 }
 
-document.querySelectorAll('[name="workflowMode"]').forEach(input => input.addEventListener('change', () => {
-  const verify = input.value === 'verify';
-  setWizardStep(!verify && (currentPreview || currentReport) ? 3 : 2);
-  if (verify && !verificationScanned && active && loginFlows.get(active.id) === 'review') runBusy(refreshWizardVerification, 'Pindai LLK Anggota');
-}));
+document.querySelectorAll('[name="workflowMode"]').forEach(input => input.addEventListener('change', () => setWizardStep(2)));
 $('#refreshWizardVerificationBtn')?.addEventListener('click', () => runBusy(refreshWizardVerification, 'Pindai LLK Anggota'));
 $('#runWizardVerificationBtn')?.addEventListener('click', () => active && runBusy(async () => {
   const message = String($('#wizardVerificationMessage')?.value || '').trim();
@@ -876,114 +662,155 @@ $('#runWizardVerificationBtn')?.addEventListener('click', () => active && runBus
   $('#runWizardVerificationBtn').disabled=true;
   $('#wizardVerificationMessage').closest('.form-group').hidden = true;
   $('#runWizardVerificationBtn').hidden = true;
-  $('#refreshWizardVerificationBtn').textContent = 'Pindai sisa LLK';
+  $('#refreshWizardVerificationBtn').textContent = 'Periksa sisa LLK';
+  $('#refreshWizardVerificationBtn').classList.add('btn-primary');
+  $('#refreshWizardVerificationBtn').classList.remove('btn-outline');
 }, 'Verifikasi LLK Anggota'));
-async function fetchBootstrapProfile() {
-  if (!bootstrapFlow) throw new Error('Sesi bootstrap tidak aktif. Klik Buka ulang SSO untuk membuat sesi login baru.');
-  try {
-    const out = await api('/api/bootstrap/complete', {
-      method: 'POST',
-      body: JSON.stringify({ tempId: bootstrapFlow, supervisorNip: String($('#quickSupervisorNip')?.value || '').trim() })
-    });
-    sessionStorage.removeItem('bootstrapFlow');
-    bootstrapFlow = null;
-    setNewProfileMode(false);
-    loginFlows.set(out.employee.id, 'review');
-    selectEmployee(out.employee, true);
-    const loginBadge = $('#loginBadge');
-    if (loginBadge) loginBadge.textContent = 'Sesi aktif';
-    setWizardStep(2);
-    await loadEmployees();
-    const templateCount = out.history?.candidate?.activities?.length || out.history?.activities?.length || 0;
-    log(`Profil ${out.employee.name} (${out.employee.nip}) dibuat dari SSO; ${templateCount} pola kegiatan diimpor.`);
-    feedback(`SSO aktif. ${templateCount} pola kegiatan ditemukan.`);
-  } catch (error) {
-    if (error?.status === 401 || /Login LLK belum terdeteksi|kedaluwarsa|Sesi LLK tidak ditemukan/i.test(error?.message || '')) {
-      $('#quickSsoRestartBtn').hidden = false;
-      feedback('Login SSO belum selesai atau sesi telah berakhir. Klik Buka ulang SSO, login di Edge, lalu klik Saya sudah login.', true);
-    }
-    throw error;
-  }
+function renderOnboarding() {
+  $('#employeeForm').hidden = Boolean(active);
+  $('#workspace').hidden = !active;
+  $('#endSessionBtn').hidden = !active && !bootstrapFlow && onboardingState !== 'error';
+  $('#quickSsoLoginBtn').hidden = onboardingState !== 'idle';
+  $('#quickSsoRetryBtn').hidden = onboardingState !== 'error';
+  $('#onboardingStatus').textContent = onboardingState === 'waiting'
+    ? 'Selesaikan login SSO di Edge. Identitas dan kegiatan LLK akan dibaca otomatis.'
+    : onboardingState === 'completing' ? 'Login terdeteksi. Memeriksa identitas, atasan langsung, dan kegiatan LLK…'
+    : onboardingState === 'checking' ? 'Memeriksa sesi…'
+    : onboardingState === 'error' ? 'Proses berhenti. Klik Coba lagi untuk melanjutkan, atau Akhiri sesi untuk login ulang.'
+    : 'Masukkan NIP atasan langsung, lalu klik Login SSO.';
+  if (!active) $('#loginBadge').textContent = onboardingState === 'waiting' ? 'Menunggu SSO' : onboardingState === 'completing' ? 'Memverifikasi' : 'Belum masuk';
+  syncControls();
 }
 
+function stopSessionPolling() {
+  clearTimeout(sessionPollTimer);
+  sessionPollTimer = null;
+  sessionPollGeneration++;
+}
 
-$('#employeeForm')?.addEventListener('submit', event => {
-  event.preventDefault();
-  runBusy(async () => {
-    const supervisorNip = String($('#quickSupervisorNip')?.value || '').trim();
-    if (!/^\d{18}$/.test(supervisorNip)) {
-      $('#quickSupervisorNip')?.focus();
-      throw new Error('NIP atasan langsung harus tepat 18 digit angka');
+function failOnboarding(error) {
+  stopSessionPolling();
+  onboardingState = 'error';
+  renderOnboarding();
+  log(`Login berhenti: ${error.message}`, 'Gagal');
+  feedback(`${error.message} Klik Coba lagi untuk melanjutkan pemeriksaan. Untuk login ulang, klik Akhiri sesi.`, true);
+}
+
+async function fetchBootstrapProfile() {
+  if (!bootstrapFlow || onboardingState === 'completing') return;
+  stopSessionPolling();
+  onboardingState = 'completing';
+  renderOnboarding();
+  await runBusy(async () => {
+    try {
+      const out = await api('/api/bootstrap/complete', {
+        method: 'POST', body: JSON.stringify({ tempId: bootstrapFlow })
+      });
+      selectEmployee(out.employee);
+      const templateCount = out.history?.candidate?.activities?.length || out.history?.activities?.length || 0;
+      log(`Sesi ${out.employee.name} (${out.employee.nip}) aktif; ${templateCount} pola kegiatan dibaca.`);
+      feedback(`SSO aktif. ${templateCount} pola kegiatan ditemukan.`);
+    } catch (error) {
+      failOnboarding(error);
     }
-    const satker = '';
-    log('Membuka Edge untuk login SSO dan mengambil profil…');
-    const res = await api('/api/bootstrap/login', {
-      method: 'POST',
-      body: JSON.stringify({ satker, supervisorNip, department: 'umum_keuangan' })
-    });
-    bootstrapFlow = res.tempId;
-    sessionStorage.setItem('bootstrapFlow', bootstrapFlow);
-    $('#quickSsoLoginBtn').hidden = true;
-    $('#quickSsoFetchBtn').hidden = false;
-    $('#quickSsoRestartBtn').hidden = false;
-    log(res.message || 'Silakan selesaikan login SSO di Edge.');
-    feedback('Selesaikan login SSO di Edge, lalu klik Saya sudah login. Profil dan kegiatan pada halaman pertama /llk akan dibaca otomatis.');
-  }, 'Tambah Profil dari SSO');
+  }, 'Membaca data LLK');
+}
+
+async function resumeSession() {
+  stopSessionPolling();
+  const generation = sessionPollGeneration;
+  const status = await api('/api/session');
+  if (generation !== sessionPollGeneration) return;
+  if (status.employee) { selectEmployee(status.employee); return; }
+  bootstrapFlow = status.pending?.tempId || null;
+  onboardingState = bootstrapFlow ? 'waiting' : 'idle';
+  renderOnboarding();
+  if (!bootstrapFlow) return;
+  if (status.pending.authenticated) { await fetchBootstrapProfile(); return; }
+  const poll = async () => {
+    if (generation !== sessionPollGeneration) return;
+    if (busy) { sessionPollTimer = setTimeout(poll, 1500); return; }
+    try {
+      const next = await api('/api/session');
+      if (generation !== sessionPollGeneration) return;
+      if (next.employee) { selectEmployee(next.employee); return; }
+      if (next.pending?.tempId !== bootstrapFlow) throw new Error('Sesi login telah berakhir. Akhiri sesi, lalu login SSO kembali.');
+      if (next.pending.authenticated) { await fetchBootstrapProfile(); return; }
+      sessionPollTimer = setTimeout(poll, 1500);
+    } catch (error) {
+      if (generation === sessionPollGeneration) failOnboarding(error);
+    }
+  };
+  sessionPollTimer = setTimeout(poll, 1500);
+}
+
+$('#employeeForm').addEventListener('submit', event => {
+  event.preventDefault();
+  if (onboardingState !== 'idle') return;
+  runBusy(async () => {
+    const supervisorNip = $('#quickSupervisorNip').value.trim();
+    if (!/^\d{18}$/.test(supervisorNip)) throw new Error('NIP atasan langsung harus tepat 18 digit angka');
+    try {
+      const result = await api('/api/bootstrap/login', {
+        method: 'POST', body: JSON.stringify({ supervisorNip, department: 'umum_keuangan' })
+      });
+      bootstrapFlow = result.tempId;
+      onboardingState = 'waiting';
+      renderOnboarding();
+      log(result.message || 'Selesaikan login SSO di Edge.');
+    } catch (error) {
+      failOnboarding(error);
+    }
+  }, 'Login SSO').then(() => {
+    if (onboardingState === 'waiting') resumeSession().catch(failOnboarding);
+  });
 });
 
-$('#quickSsoRestartBtn')?.addEventListener('click', () => {
-  bootstrapFlow = null;
-  sessionStorage.removeItem('bootstrapFlow');
-  $('#quickSsoRestartBtn').hidden = true;
-  $('#quickSsoFetchBtn').hidden = true;
-  $('#quickSsoLoginBtn').hidden = false;
-  $('#quickSupervisorNip')?.focus();
-  feedback('Masukkan NIP atasan jika perlu, lalu klik Login SSO & buat profil untuk membuka sesi Edge baru.');
+$('#quickSsoRetryBtn').addEventListener('click', () => {
+  if (!busy && onboardingState === 'error') loadApp();
 });
 
-$('#quickSsoFetchBtn')?.addEventListener('click', () => runBusy(fetchBootstrapProfile, 'Tarik Data Akun'));
-
-
-$('#employeeList')?.addEventListener('click', event => {
-  const item = event.target.closest('[data-id]');
-  const employee = item && employees.find(row => row.id === item.dataset.id);
-  if (employee) {
-    selectEmployee(employee);
-    log(`Beralih ke profil ${employee.name}`);
-  }
+$('#endSessionBtn').addEventListener('click', () => {
+  if (busy) return;
+  if ((currentPreview && !currentReport || calendarSelection.start && active || $('#wizardVerificationMessage').value.trim())
+    && !window.confirm('Akhiri sesi akan menghapus draf tanggal, isian, dan pesan yang belum dikirim. Lanjutkan?')) return;
+  runBusy(async () => {
+    stopSessionPolling();
+    try {
+      await api('/api/session/end', { method: 'POST', body: '{}' });
+    } catch (error) {
+      if (!active) failOnboarding(error);
+      else throw error;
+      return;
+    }
+    active = null;
+    bootstrapFlow = null;
+    currentPreview = null;
+    currentReport = null;
+    personalStage = null;
+    verificationTargets = [];
+    verificationStageToken = null;
+    progressCursors.clear();
+    editDayState.clear();
+    updateCalendarSelection(null, null);
+    $('#employeeForm').reset();
+    $('#wizardVerificationMessage').value = '';
+    $('#previewCards').textContent = '';
+    $('#reportResults').textContent = '';
+    $('#personalStageDiffBody').textContent = '';
+    $('#personalStageBox').hidden = true;
+    $('#personalStageConfirm').checked = false;
+    renderPersonalTemplate({});
+    $('#workspaceTitle').textContent = 'Belum ada sesi';
+    $('#profilePosition').textContent = 'Masuk dengan akun SSO untuk mulai';
+    $('#satkerSelect').textContent = '';
+    $('#satkerSelect').hidden = true;
+    onboardingState = 'idle';
+    renderOnboarding();
+    feedback('Sesi diakhiri. Masukkan NIP atasan langsung untuk login kembali.');
+  }, 'Akhiri sesi').then(() => { if (!active && onboardingState === 'idle') $('#quickSupervisorNip').focus(); });
 });
 
-$('#loginBtn')?.addEventListener('click', () => active && runBusy(async () => {
-  const employeeId = active.id;
-  log('Membuka browser Edge untuk login SSO…');
-  const result = await api(`/api/employees/${employeeId}/login`, { method: 'POST', body: '{}' });
-  loginFlows.set(employeeId, 'waiting');
-  if (active?.id === employeeId) renderLoginFlow();
-  pollLogin(employeeId);
-  log(result.message || 'Jendela Edge terbuka. Login akan dideteksi otomatis.');
-}, 'Buka SSO'));
-
-$('#completeLoginBtn')?.addEventListener('click', () => active && runBusy(async () => {
-  const employeeId = active.id;
-  stopLoginPolling();
-  try {
-    await completeLoginFlow(employeeId);
-  } catch (error) {
-    pollLogin(employeeId);
-    if (error.status === 401) error.message = 'Login belum terdeteksi di browser. Pastikan proses SSO di Edge selesai.';
-    throw error;
-  }
-}, 'Verifikasi Login'));
-
-$('#cancelLoginBtn')?.addEventListener('click', () => active && runBusy(async () => {
-  const employeeId = active.id;
-  stopLoginPolling();
-  log('Membatalkan alur login…');
-  const result = await api(`/api/employees/${employeeId}/login/cancel`, { method: 'POST', body: '{}' });
-  loginFlows.delete(employeeId);
-  if (active?.id === employeeId) renderLoginFlow();
-  log(result.message || 'Login dibatalkan.');
-}, 'Batal Login'));
 
 
 $('#confirmCheck')?.addEventListener('change', syncControls);
@@ -1011,9 +838,6 @@ document.querySelectorAll('[data-preset]').forEach(btn => {
   });
 });
 
-$('#employeeSearch')?.addEventListener('input', () => {
-  renderEmployeeList();
-});
 
 
 $('#exportReportBtn')?.addEventListener('click', () => {
@@ -1029,36 +853,6 @@ $('#clearLogBtn')?.addEventListener('click', () => {
 });
 
 
-$('#deleteEmployeeBtn')?.addEventListener('click', () => {
-  if (!active) return;
-  const grp = $('#deleteConfirmGroup');
-  if (grp) grp.hidden = false;
-  const tgt = $('#deleteTargetId');
-  if (tgt) tgt.textContent = active.id;
-  const input = $('#deleteConfirm');
-  if (input) {
-    input.value = '';
-    input.focus();
-  }
-  syncControls();
-});
-
-$('#deleteConfirm')?.addEventListener('input', syncControls);
-
-$('#deleteConfirmBtn')?.addEventListener('click', () => active && runBusy(async () => {
-  if ($('#deleteConfirm')?.value !== active.id) throw new Error(`Ketik ${active.id} untuk konfirmasi.`);
-  log(`Menghapus profil ${active.name}…`);
-  await api(`/api/profiles/${active.id}`, { method: 'DELETE', body: JSON.stringify({ confirm: active.id }) });
-  const deletedId = active.id;
-  active = null;
-  const workspace = $('#workspace');
-  if (workspace) workspace.hidden = true;
-  const grp = $('#deleteConfirmGroup');
-  if (grp) grp.hidden = true;
-  await loadEmployees();
-  if (employees[0]) selectEmployee(employees[0]);
-  log(`Profil ${deletedId} berhasil dihapus.`);
-}, 'Hapus Profil'));
 
 
 $('#importPersonalTemplateBtn')?.addEventListener('click', () => active && runBusy(async () => {
@@ -1107,26 +901,6 @@ $('#applyPersonalTemplateBtn')?.addEventListener('click', () => active && runBus
   log(`Daftar kegiatan halaman LLK untuk ${active.name} aktif.`);
   syncControls();
 }, 'Terapkan Daftar Kegiatan'));
-$('#retrySessionBtn').addEventListener('click', checkAccountSession);
-$('#openAccountBrowserBtn').addEventListener('click', () => active && runBusy(async () => {
-  await api(`/api/employees/${active.id}/login`, { method: 'POST', body: '{}' });
-  feedback('Jendela LLK dibuka. Sesi aplikasi tetap tersedia.');
-}, 'Buka LLK di browser'));
-
-function confirmAccountChange() {
-  return !(currentPreview && !currentReport || calendarSelection.start || $('#wizardVerificationMessage').value.trim()) || window.confirm('Ganti akun akan menghapus draf tanggal, isian, dan pesan yang belum dikirim. Lanjutkan?');
-}
-document.querySelectorAll('[data-change-work]').forEach(button => button.addEventListener('click', () => {
-  document.querySelectorAll('[name="workflowMode"]').forEach(input => { input.checked = false; });
-  setWizardStep(2);
-}));
-document.querySelectorAll('[data-go-step]').forEach(btn => {
-  btn.addEventListener('click', () => setWizardStep(Number(btn.dataset.goStep)));
-});
-$('#wizardVerificationPreview')?.addEventListener('click', event => {
-  const button = event.target.closest('[data-go-step]');
-  if (button) setWizardStep(Number(button.dataset.goStep));
-});
 
 $('#previewCards')?.addEventListener('click', event => {
   const btn = event.target.closest('[data-toggle-edit]');
@@ -1138,6 +912,8 @@ $('#previewCards')?.addEventListener('change', syncPreviewFromForm);
 $('#newSubmissionBtn')?.addEventListener('click', () => {
   const area = $('#reportArea');
   if (area) area.hidden = true;
+  currentPreview = null; currentReport = null; editDayState.clear();
+  $('#previewArea').hidden = true;
   setWizardStep(2);
 });
 
@@ -1152,11 +928,9 @@ $('#previewBtn')?.addEventListener('click', () => active && runBusy(async () => 
     method: 'POST',
     body: JSON.stringify({ start, end, source, department })
   });
-  await loadEmployees();
-  const refreshed = employees.find(employee => employee.id === active.id);
-  if (refreshed) selectEmployee(refreshed);
   renderPreview(preview);
   setWizardStep(3);
+  $('#previewArea').scrollIntoView({ block: 'start', behavior: 'smooth' });
 }, 'Menyiapkan isian…'));
 
 $('#resetPersonalTemplateBtn')?.addEventListener('click', () => active && runBusy(async () => {

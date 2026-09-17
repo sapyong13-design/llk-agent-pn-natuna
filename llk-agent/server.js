@@ -1,6 +1,5 @@
 import { createServer } from 'node:http';
-import { readFile, writeFile, rename, mkdir, appendFile, chmod, rm, readdir } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { readFile, writeFile, rename, mkdir, appendFile, chmod } from 'node:fs/promises';
 import { join, resolve, extname, relative, isAbsolute } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 import { chromium } from 'playwright-core';
@@ -9,23 +8,18 @@ import { browserLaunchOptions } from './browser.mjs';
 const ROOT = resolve(import.meta.dirname);
 const PUBLIC = join(ROOT, 'public');
 const DATA = join(ROOT, 'data');
-const PROFILE_ROOT = join(ROOT, 'profiles');
 const PORT = Number(process.env.PORT || 4545);
 const LLK_BASE = 'https://llk.mahkamahagung.go.id';
-const employeeFile = join(DATA, 'employees.json');
 const templateFile = join(DATA, 'department-templates.json');
 const reportFile = id => join(DATA, `report-${id}.json`);
-const profilePath = id => join(PROFILE_ROOT, id);
-const verifierFile = join(DATA, 'verifier-relationships.json');
 const auditFile = join(DATA, 'audit.jsonl');
-const personalTemplateRoot = join(DATA, 'personal-templates');
-const personalHistoryRoot = join(DATA, 'personal-template-history');
-const personalFile = id => join(personalTemplateRoot, `${safeId(id)}.json`);
-const personalHistoryDir = id => join(personalHistoryRoot, safeId(id));
-const MAX_HISTORY = 20;
 const sensitiveKeys = /password|cookie|csrf|token|secret|authorization/i;
 const locks = new Set();
 const stagedPersonal = new Map();
+const personalTemplates = new Map();
+const sessionBrowsers = new Set();
+let sessionEmployee = null;
+let sessionBusy = false;
 const operationProgress=new Map();
 function progress(id,stage,message,detail={}){const current=operationProgress.get(id)||{sequence:0,events:[]};const event={sequence:++current.sequence,at:new Date().toISOString(),stage,message,...sanitize(detail)};current.events.push(event);if(current.events.length>100)current.events.shift();current.active=!['complete','error'].includes(stage);current.latest=event;operationProgress.set(id,current);return event;}
 function progressState(id,since=0){const current=operationProgress.get(id)||{sequence:0,events:[],active:false,latest:null};return {active:current.active,sequence:current.sequence,latest:current.latest,events:current.events.filter(event=>event.sequence>since)};}
@@ -35,7 +29,6 @@ const stagedVerification = new Map();
 const VERIFICATION_STAGE_TTL = 10 * 60_000;
 function closeVerificationStage(id){const stage=stagedVerification.get(id);if(!stage)return;clearTimeout(stage.timer);stagedVerification.delete(id);stage.context?.close().catch(()=>{});}
 function stageVerification(id,context,targets,filter){closeVerificationStage(id);const token=randomBytes(16).toString('hex'),stage={token,context,targets,filter,expires:Date.now()+VERIFICATION_STAGE_TTL};stage.timer=setTimeout(()=>closeVerificationStage(id),VERIFICATION_STAGE_TTL);stagedVerification.set(id,stage);return stage;}
-const LOGIN_FLOW_TTL = 10 * 60_000;
 // Kalender libur SKB 3 Menteri 2026 (17 libur nasional + 8 cuti bersama).
 const SKB_2026_DAYS = [
   {date:'2026-01-01',type:'national',label:'Tahun Baru 2026 Masehi'},
@@ -90,7 +83,6 @@ function safeId(value) { const id=String(value||''); if(!/^[A-Za-z0-9_-]{1,80}$/
 function canonical(value) { if(Array.isArray(value)) return `[${value.map(canonical).join(',')}]`; if(value&&typeof value==='object') return `{${Object.keys(value).sort().map(key=>`${JSON.stringify(key)}:${canonical(value[key])}`).join(',')}}`; return JSON.stringify(value); }
 function sanitize(value) { if(Array.isArray(value)) return value.map(sanitize); if(value&&typeof value==='object'){const out={}; for(const [key,item] of Object.entries(value)) if(!sensitiveKeys.test(key)) out[key]=sanitize(item); return out;} return typeof value==='string'?clean(value).slice(0,500):value; }
 async function audit(event, actor, payload, result={}) { const safe=sanitize(payload), record={timestamp:new Date().toISOString(),event:clean(event),actorProfile:clean(actor||'local'),counts:sanitize(result.counts||{}),result:sanitize(result.result||result),payloadDigest:createHash('sha256').update(canonical(safe)).digest('hex')}; await appendFile(auditFile,`${JSON.stringify(record)}\n`,{encoding:'utf8',mode:0o600}); }
-async function rotateFiles(dir,prefix,max=MAX_HISTORY){await mkdir(dir,{recursive:true});const names=(await readdir(dir)).filter(x=>x.startsWith(prefix)).sort().reverse();await Promise.all(names.slice(max).map(name=>rm(join(dir,name),{force:true})));}
 const localIso = date => [date.getFullYear(), String(date.getMonth() + 1).padStart(2, '0'), String(date.getDate()).padStart(2, '0')].join('-');
 function parseDate(value, label = 'Tanggal') {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) bad(`${label} tidak valid`);
@@ -121,51 +113,35 @@ function normalizeOfficialDate(value) {
   match = text.match(/^(\d{1,2})\s+([a-z]+)\s+(\d{4})$/);
   return match && months[match[2]] ? `${match[3]}-${String(months[match[2]]).padStart(2, '0')}-${match[1].padStart(2, '0')}` : null;
 }
-async function getEmployees() {
-  if (!existsSync(employeeFile)) return [];
-  const value = await readJson(employeeFile);
-  if (!Array.isArray(value)) throw new Error('Data pegawai rusak');
-  return value;
-}
-async function findEmployee(id) { const employee = (await getEmployees()).find(e => e.id === id); if (!employee) throw new HttpError(404, 'Pegawai tidak ditemukan'); return employee; }
+async function getEmployees() { return sessionEmployee ? [sessionEmployee] : []; }
+async function findEmployee(id) { if (!sessionEmployee || sessionEmployee.id !== id) throw new HttpError(401, 'Sesi pegawai tidak aktif. Login SSO diperlukan.'); return sessionEmployee; }
 async function withLock(id, task) {
-  if (locks.has(id) || loginFlows.has(id)) throw new HttpError(409, 'Operasi pegawai sedang berjalan');
-  locks.add(id); try { return await task(); } finally { locks.delete(id); }
+  if (sessionBusy || locks.size) throw new HttpError(409, 'Operasi sesi sedang berjalan');
+  locks.add(id); try { await findEmployee(id); return await task(); } finally { locks.delete(id); }
 }
-async function ensurePasswordManagerPrefs(dir) {
-  const prefDir = join(dir, 'Default'), prefFile = join(prefDir, 'Preferences');
-  await mkdir(prefDir, { recursive: true });
-  let prefs = {};
-  try { prefs = JSON.parse(await readFile(prefFile, 'utf8')); } catch {}
-  let changed = false;
-  if (prefs.credentials_enable_service !== true) { prefs.credentials_enable_service = true; changed = true; }
-  prefs.profile = prefs.profile || {};
-  if (prefs.profile.password_manager_enabled !== true) { prefs.profile.password_manager_enabled = true; changed = true; }
-  prefs.autofill = prefs.autofill || {};
-  if (prefs.autofill.profile_enabled !== true) { prefs.autofill.profile_enabled = true; changed = true; }
-  if (prefs.autofill.credit_card_enabled !== true) { prefs.autofill.credit_card_enabled = true; changed = true; }
-  if (changed) await saveJson(prefFile, prefs);
+function storeSessionCookies(id, cookies) { sessionCookies.set(id, cookies); }
+async function launchSessionContext(headless) {
+  const browser = await chromium.launch({ ...browserLaunchOptions(), headless });
+  sessionBrowsers.add(browser);
+  browser.on('disconnected', () => sessionBrowsers.delete(browser));
+  try {
+    const context = await browser.newContext({ viewport: headless ? { width: 1365, height: 768 } : null });
+    context.on('close', () => browser.close().catch(() => {}));
+    return context;
+  } catch (error) { await browser.close().catch(() => {}); throw error; }
 }
-const sessionCookieFile=id=>join(profilePath(id),'session-cookies.json');
-async function storeSessionCookies(id,cookies){sessionCookies.set(id,cookies);await mkdir(profilePath(id),{recursive:true});await saveJson(sessionCookieFile(id),cookies);}
-async function loadSessionCookies(id){if(sessionCookies.has(id))return sessionCookies.get(id);if(existsSync(sessionCookieFile(id))){try{const cookies=await readJson(sessionCookieFile(id));sessionCookies.set(id,cookies);return cookies;}catch{}}return [];}
 async function launchEmployee(id, headless = true) {
-  const employee = await findEmployee(id), dir = profilePath(id);
-  await mkdir(dir, { recursive: true });
-  if (!headless) await ensurePasswordManagerPrefs(dir);
-  let context;
-  const launchOptions = browserLaunchOptions();
-  if (headless) { const browser = await chromium.launch({ ...launchOptions, headless: true }); context = await browser.newContext({ viewport: { width: 1365, height: 768 } }); context.on('close', () => browser.close().catch(() => {})); }
-  else context = await chromium.launchPersistentContext(dir, { ...launchOptions, headless: false, viewport: null });
-  const cookies = await loadSessionCookies(id);
-  if (cookies?.length) await context.addCookies(cookies);
-  return { employee, context };
+  const employee = await findEmployee(id), context = await launchSessionContext(headless);
+  try {
+    const cookies = sessionCookies.get(id);
+    if (cookies?.length) await context.addCookies(cookies);
+    return { employee, context };
+  } catch (error) { await context.close().catch(() => {}); throw error; }
 }
 async function closeLoginFlow(id, flow = loginFlows.get(id)) {
   if (!flow || flow.closing) return false;
-  flow.closing = true; clearTimeout(flow.timer); loginFlows.delete(id); locks.delete(id);
+  flow.closing = true; clearTimeout(flow.timer); loginFlows.delete(id);
   try { await flow.context.close(); } catch {}
-  if (id.startsWith('temp-')) await rm(profilePath(id), { recursive: true, force: true }).catch(() => {});
   return true;
 }
 async function minimizeLoginWindow(context) {
@@ -177,31 +153,19 @@ async function minimizeLoginWindow(context) {
     await session.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'minimized' } });
   } finally { await session.detach(); }
 }
-async function openLogin(id) {
-  const existing = loginFlows.get(id);
-  if (existing?.completed) {
-    const page = existing.context.pages()[0];
-    if (page) {
-      const session = await existing.context.newCDPSession(page);
-      try {
-        const { windowId } = await session.send('Browser.getWindowForTarget');
-        await session.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'normal' } });
-      } finally { await session.detach(); }
-    }
-    await existing.context.pages()[0]?.bringToFront();
-    return { active: true, createdAt: existing.createdAt, expiresAt: null, message: 'Jendela SSO dibuka kembali.' };
-  }
-  if (locks.has(id) || loginFlows.has(id)) throw new HttpError(409, 'Operasi pegawai sedang berjalan');
-  locks.add(id);
-  try {
-    const { employee, context } = await launchEmployee(id, false), createdAt = new Date().toISOString();
-    const flow = { employee, context, createdAt, expiresAt: null, closing: false };
-    loginFlows.set(id, flow);
-    context.on('close', () => { if (loginFlows.get(id) === flow) { clearTimeout(flow.timer); loginFlows.delete(id); locks.delete(id); } });
-    const page = context.pages()[0] ?? await context.newPage();
-    await page.goto(LLK_BASE, { waitUntil: 'domcontentloaded' });
-    return { active: true, createdAt, expiresAt: flow.expiresAt, message: 'Edge dibuka. Selesaikan login SSO, lalu klik Selesai Login.' };
-  } catch (error) { await closeLoginFlow(id); locks.delete(id); throw error; }
+function currentSession() {
+  const pending = [...loginFlows.entries()].find(([, flow]) => !flow.completed && !flow.closing && !flow.closed);
+  return { employee: sessionEmployee, pending: pending ? { tempId: pending[0], authenticated: Boolean(authenticatedLlkPage(pending[1].context)) } : null };
+}
+async function clearSession() {
+  for (const id of stagedVerification.keys()) closeVerificationStage(id);
+  await Promise.all([...loginFlows].map(([id, flow]) => closeLoginFlow(id, flow)));
+  await Promise.all([...sessionBrowsers].map(browser => browser.close().catch(() => {})));
+  sessionEmployee = null;
+  sessionCookies.clear();
+  personalTemplates.clear();
+  stagedPersonal.clear();
+  operationProgress.clear();
 }
 const SCHEDULE_PATTERNS = {
   full: { blocks: day => day.dow === 5 ? [['08:00', '17:00']] : [['08:00', '16:30']] },
@@ -408,9 +372,7 @@ async function submitPreview(id, rawPreview, policy) {
     const selectedSupervisor = await resolveLlkSupervisor(page, employeeId(employee.supervisor.nip) || employee.supervisor.id);
     const liveSupervisor = { id: selectedSupervisor.id, nip: selectedSupervisor.nip, name: selectedSupervisor.name, fields: { nip: 'live-page-fetch', name: 'live-page-fetch' } };
     if (!employeeId(liveSupervisor.nip) || !liveSupervisor.id || !liveSupervisor.name) throw new Error('Lookup atasan tidak lengkap. Pengiriman dibatalkan.');
-    const employees = await getEmployees(), employeeIndex = employees.findIndex(item => item.id === employee.id);
     employee.supervisor = { id: liveSupervisor.id, nip: liveSupervisor.nip, name: liveSupervisor.name, verified: true, source: 'llk-select2' };
-    if (employeeIndex >= 0) { employees.splice(employeeIndex, 1, employee); await saveJson(employeeFile, employees); }
     for (const day of preview) {
       if (existingDates.has(day.date)) {
         report.results.push({date:day.date,state:'skipped',status:'duplicate',statusLabel:'Sudah ada di LLK',message:'Dilewati karena tanggal sudah memiliki LLK di halaman pertama',submitted:false,skipped:true,failed:false,verified:true,itemCount:day.items.length});
@@ -468,15 +430,15 @@ async function importVerifier(id, existingContext, existingPage){
     const rows=await page.evaluate(()=>{const text=e=>String(e?.textContent||'').replace(/\s+/g,' ').trim();return [...document.querySelectorAll('table tbody tr')].map((row,index)=>{const cells=[...row.querySelectorAll('td')].map(text);const link=row.querySelector('a[href]');return {routeId:link?.getAttribute('href')?.split('/').filter(Boolean).pop()||String(index),nip:(cells.join(' ').match(/\b\d{8,20}\b/)||[])[0]||'',name:cells.find(x=>x&&!/^\d+$/.test(x))||''};}).filter(x=>x.name);});
     if(!rows.length)return {available:false,verifier,employees:[],warning:'Tahap verifikator: daftar pegawai tidak tersedia untuk akun ini.'};
     const relationships={available:true,importedAt:new Date().toISOString(),verifier,employees:rows.map(row=>({employeeId:employeeId(row.nip)||slug(row.name),name:clean(row.name),llkRouteId:clean(row.routeId)}))};
-    await saveJson(verifierFile,relationships);await audit('verifier.import',id,{employeeCount:relationships.employees.length},{counts:{employees:relationships.employees.length},result:'imported'});return relationships;
+    await audit('verifier.import',id,{employeeCount:relationships.employees.length},{counts:{employees:relationships.employees.length},result:'imported'});return relationships;
   } finally {if(owned)await context.close();}
 }
 async function templateSnapshot(){const templates=await readJson(templateFile);return templates.version&&templates.departments?templates:{version:1,updatedAt:null,departments:templates};}
-async function readPersonal(id){return existsSync(personalFile(id))?validatePersonal(await readJson(personalFile(id)),id):null;}
+async function readPersonal(id){return personalTemplates.get(id)||null;}
 function validatePersonal(value,id){if(!value||typeof value!=='object'||value.employeeId!==id||!Array.isArray(value.activities)||value.activities.length>1000)bad('Daftar kegiatan profil tidak valid');const activities=value.activities.map(a=>{const nama=clean(a?.nama),kategori=clean(a?.kategori)||'Pendukung';if(!nama||isBreakActivity(nama)||!['Utama','Pendukung'].includes(kategori))bad('Kegiatan profil tidak valid');return {nama,kategori,result:'Selesai',...(a.start?{start:clean(a.start)}:{}),...(a.end?{end:clean(a.end)}:{})};});return {...value,activities};}
 async function personalResponse(employee){const personal=await readPersonal(employee.id),stored=await readJson(templateFile),departments=stored.departments||stored,fallback=departments[employee.department];return {source:personal?.activities?.length?'personal':'department',personal,activities:personal?.activities?.length?personal.activities:(fallback?.activities||[]),fallbackLabel:fallback?.label||employee.department};}
 async function importPersonal(id, existingContext, existingPage) {
-  const employee = await findEmployee(id), owned = !existingContext, { context } = existingContext ? { context: existingContext } : await launchEmployee(id);
+  const owned = !existingContext, { context } = existingContext ? { context: existingContext } : await launchEmployee(id);
   try {
     const entries = await scrapeEntries(context, existingPage), current = await readPersonal(id);
     if (entries.available === false) return { available: false, current, candidate: null, warning: entries.warning || 'Tahap riwayat: data LLK tidak tersedia; template pribadi tidak diubah.' };
@@ -590,68 +552,43 @@ async function enrichEmployeeFromSso(employee, page) {
     accountIdentity: { name, nip, position, satker },
     supervisorLookup: lookup
   };
-  const employees = await getEmployees();
-  const index = employees.findIndex(item => item.id === employee.id || item.nip === updated.nip);
-  if (index >= 0) employees.splice(index, 1, updated); else employees.push(updated);
-  await saveJson(employeeFile, employees);
   return updated;
 }
 
 async function launchExternalBootstrap(satker, supervisorNip, department = 'umum_keuangan') {
-  const tempId = `temp-${Date.now()}`;
-  const employee = { id:tempId, nip:'', name:'Pegawai Baru', position:'Pegawai / Pelaksana', department, satker:clean(satker)||'Satker Lain', supervisor:{id:employeeId(supervisorNip),nip:employeeId(supervisorNip),name:''} };
-  const dir=profilePath(tempId);
-  await mkdir(dir,{recursive:true});
-  await ensurePasswordManagerPrefs(dir);
-  const context=await chromium.launchPersistentContext(dir,{channel:'msedge',headless:false,viewport:null});
+  const tempId = `temp-${randomBytes(12).toString('hex')}`;
+  const employee = { id:tempId, nip:'', name:'Pegawai Baru', position:'Pegawai / Pelaksana', department, satker:clean(satker)||'Satker Lain', supervisor:{id:supervisorNip,nip:supervisorNip,name:''} };
+  const context = await launchSessionContext(false);
   return {employee,context,tempId};
 }
 
 async function completeExternalBootstrap(tempId, tempEmployee, context) {
   const page = await requireAuthenticatedLlkPage(context);
   const enrichedDraft = await enrichEmployeeFromSso(tempEmployee, page);
-  const actualNip = employeeId(enrichedDraft.nip);
-  if (!actualNip) throw new HttpError(401, 'NIP akun login SSO tidak terdeteksi dari profil LLK');
+  const actualNip = enrichedDraft.accountIdentity.nip;
+  if (!/^\d{18}$/.test(actualNip) || !enrichedDraft.accountIdentity.name) throw new HttpError(401, 'Identitas akun login SSO tidak terdeteksi dari profil LLK');
+  if (!enrichedDraft.supervisor.verified) throw new HttpError(422, enrichedDraft.supervisorLookup.error || 'Atasan belum dapat diverifikasi dari LLK');
   const enriched = { ...enrichedDraft, id: actualNip, nip: actualNip };
-  const employees = (await getEmployees()).filter(item => item.id !== tempId && item.id !== actualNip);
-  employees.push(enriched);
-  await saveJson(employeeFile, employees);
-  const history = await importPersonal(actualNip, context, page);
-  if (history?.candidate) await saveJson(personalFile(actualNip), history.candidate);
-  await storeSessionCookies(actualNip, await context.cookies());
-  const flow = loginFlows.get(tempId);
-  if (flow) {
-    flow.employee = enriched;
+  try {
+    const history = await importPersonal(actualNip, context, page);
+    const cookies = await context.cookies();
+    await minimizeLoginWindow(context).catch(error => console.warn('SSO tidak dapat diminimalkan:', error.message));
+    const flow = loginFlows.get(tempId);
+    if (!flow || flow.closed || flow.closing || stopping) throw new HttpError(401, 'Sesi login berakhir. Mulai login SSO kembali.');
+    if (history?.candidate) personalTemplates.set(actualNip, validatePersonal(history.candidate, actualNip));
+    stagedPersonal.delete(actualNip);
+    storeSessionCookies(actualNip, cookies);
+    sessionEmployee = enriched;
+    flow.completed = true;
     flow.actualNip = actualNip;
     flow.fetchedAt = new Date().toISOString();
-    clearTimeout(flow.timer);
-    flow.expiresAt = null;
-  }
-  await minimizeLoginWindow(context).catch(error => console.warn('SSO tidak dapat diminimalkan:', error.message));
-  return { employee: enriched, verifier: { available: false, warning: null }, history, sessionActive: true, tempId };
+    flow.result = { employee: enriched, verifier: { available: false, warning: null }, history, sessionActive: true, tempId };
+    return flow.result;
+  } catch (error) { stagedPersonal.delete(actualNip); throw error; }
 }
 
-function normalizedIdentity(value){return clean(value).toLocaleLowerCase('id-ID');}
-async function completeLogin(id){
-  const flow = loginFlows.get(id); if (!flow || flow.closing) throw new HttpError(409, 'Tidak ada proses login aktif');
-  const page = await requireAuthenticatedLlkPage(flow.context);
-  const employee = await enrichEmployeeFromSso(flow.employee, page);
-  const actualNip = employeeId(employee.nip), expectedNip = employeeId(flow.employee.nip), warnings = [];
-  if (expectedNip && actualNip !== expectedNip) throw new HttpError(401, 'Identitas akun SSO tidak cocok dengan NIP pegawai terpilih');
-  if (!expectedNip && normalizedIdentity(employee.name) !== normalizedIdentity(flow.employee.name)) {
-    throw new HttpError(401, 'Identitas akun SSO tidak cocok dengan nama pegawai terpilih');
-  }
-  const history = await importPersonal(id, flow.context, page); if (history.warning) warnings.push(history.warning);
-  await storeSessionCookies(id, await flow.context.cookies());
-  clearTimeout(flow.timer);
-  flow.completed = true;
-  flow.expiresAt = null;
-  locks.delete(id);
-  await minimizeLoginWindow(flow.context).catch(error => console.warn('SSO tidak dapat diminimalkan:', error.message));
-  return { active: false, authenticated: true, stage: 'complete', identity: employee.accountIdentity, employee, warning: warnings.join(' ') || null, warnings, verifier: { available: false, warning: null }, history, autoApplied: false };
-}
 async function verificationTargets(id, context, extractIds = true) {
-  progress(id,'launch','Memuat sesi LLK tersimpan di browser headless…');
+  progress(id,'launch','Memuat sesi LLK aktif di browser headless…');
   try {
     const page=context.pages()[0]??await context.newPage();
     if(!llkLocation(page.url()).authenticated){
@@ -790,6 +727,7 @@ async function runAutomaticVerification(id,input) {
   if(!stage||stage.expires<Date.now()||stage.token!==clean(input.stageToken))throw new HttpError(409,'Hasil pemindaian sudah kedaluwarsa. Pindai ulang sebelum verifikasi.');
   const selected=new Set(Array.isArray(input.hllk)?input.hllk.map(String):[]),targets=selected.size?stage.targets.filter(item=>selected.has(item.hllk)):stage.targets;
   if(!targets.length)bad('Tidak ada LLK berstatus Belum Diverifikasi');
+  clearTimeout(stage.timer);
   const results=[];
   try {
     for(const [index,target] of targets.entries()){
@@ -818,58 +756,56 @@ async function runAutomaticVerification(id,input) {
   } finally { closeVerificationStage(id); }
 }
 
-async function archivePersonal(id,current){if(!current)return;const dir=personalHistoryDir(id);await mkdir(dir,{recursive:true});await saveJson(join(dir,`${String(current.version||0).padStart(6,'0')}-${Date.now()}.json`),current);await rotateFiles(dir,'');}
-async function applyPersonal(id,input){const stage=stagedPersonal.get(id);if(!stage||stage.expires<Date.now()||input.stageToken!==stage.token||input.confirm!==id)throw new HttpError(409,'Stage token atau konfirmasi tidak cocok');const current=await readPersonal(id);await archivePersonal(id,current);await saveJson(personalFile(id),stage.candidate);stagedPersonal.delete(id);await audit('personal-template.apply',id,{employeeId:id,digest:stage.digest},{counts:{activities:stage.candidate.activities.length},result:'applied'});return personalResponse(await findEmployee(id));}
-async function resetPersonal(id,input){if(input.confirm!==id)bad('Konfirmasi ID pegawai wajib sama');await findEmployee(id);const current=await readPersonal(id);if(current){await archivePersonal(id,current);await rm(personalFile(id),{force:true});}stagedPersonal.delete(id);await audit('personal-template.reset',id,{employeeId:id},{result:'reset'});return personalResponse(await findEmployee(id));}
+async function applyPersonal(id,input){await findEmployee(id);const stage=stagedPersonal.get(id);if(!stage||stage.expires<Date.now()||input.stageToken!==stage.token||input.confirm!==id)throw new HttpError(409,'Stage token atau konfirmasi tidak cocok');personalTemplates.set(id,validatePersonal(stage.candidate,id));stagedPersonal.delete(id);await audit('personal-template.apply',id,{employeeId:id,digest:stage.digest},{counts:{activities:stage.candidate.activities.length},result:'applied'});return personalResponse(await findEmployee(id));}
+async function resetPersonal(id,input){if(input.confirm!==id)bad('Konfirmasi ID pegawai wajib sama');await findEmployee(id);personalTemplates.delete(id);stagedPersonal.delete(id);await audit('personal-template.reset',id,{employeeId:id},{result:'reset'});return personalResponse(await findEmployee(id));}
 
 async function api(req,res,url) {
   const path=url.pathname;
+  if(req.method==='GET'&&path==='/api/session')return json(res,200,currentSession());
+  if(req.method==='POST'&&path==='/api/session/end'){
+    if(sessionBusy||locks.size)throw new HttpError(409,'Operasi sesi sedang berjalan. Tunggu hingga selesai.');
+    sessionBusy=true;
+    try{await clearSession();return json(res,200,currentSession());}finally{sessionBusy=false;}
+  }
   if(req.method==='GET'&&path==='/api/progress'){const id=safeId(url.searchParams.get('employeeId')),since=Math.max(0,Number(url.searchParams.get('since'))||0);return json(res,200,progressState(id,since));}
   if(req.method==='GET'&&path==='/api/calendar/2026')return json(res,200,{year:2026,source:'SKB 3 Menteri',days:SKB_2026_DAYS});
   if(req.method==='GET'&&path==='/api/employees')return json(res,200,await getEmployees());
   if(req.method==='GET'&&path==='/api/templates')return json(res,200,await templateSnapshot());
-  if(req.method==='DELETE'&&path.startsWith('/api/profiles/')){const id=safeId(decodeURIComponent(path.slice('/api/profiles/'.length))),input=await bodyJson(req);if(input.confirm!==id)bad('Konfirmasi ID pegawai wajib sama');if(locks.has(id))throw new HttpError(409,'Profil sedang digunakan');await rm(profilePath(id),{recursive:true,force:true});await audit('profile.delete',id,{employeeId:id},{result:'deleted'});return json(res,200,{deleted:true,employeeId:id});}
-  if(req.method==='POST'&&path==='/api/verification/run'){const input=await bodyJson(req),id=safeId(input.employeeId);return json(res,200,await runAutomaticVerification(id,input));}
-  if(req.method==='GET'&&path==='/api/verification/preview'){const id=safeId(url.searchParams.get('employeeId')),{context}=await launchEmployee(id,true);try{const targets=await verificationTargets(id,context),stage=stageVerification(id,context,targets,{status:'1',by:'nip',url:verificationListUrl(),pagesScanned:targets.pagesScanned||1,rowsFound:targets.rowsFound??targets.length});return json(res,200,{stageToken:stage.token,targets,total:targets.length,pagesScanned:targets.pagesScanned||1,rowsFound:targets.rowsFound??targets.length,validCount:targets.validCount??targets.length,invalidCount:targets.invalidCount||0,invalidTargets:targets.invalidTargets||[],filter:stage.filter});}catch(error){await context.close().catch(()=>{});throw error;}}
+  if(req.method==='POST'&&path==='/api/verification/run'){const input=await bodyJson(req),id=safeId(input.employeeId);return json(res,200,await withLock(id,()=>runAutomaticVerification(id,input)));}
+  if(req.method==='GET'&&path==='/api/verification/preview'){const id=safeId(url.searchParams.get('employeeId'));return json(res,200,await withLock(id,async()=>{const {context}=await launchEmployee(id,true);try{const targets=await verificationTargets(id,context),stage=stageVerification(id,context,targets,{status:'1',by:'nip',url:verificationListUrl(),pagesScanned:targets.pagesScanned||1,rowsFound:targets.rowsFound??targets.length});return {stageToken:stage.token,targets,total:targets.length,pagesScanned:targets.pagesScanned||1,rowsFound:targets.rowsFound??targets.length,validCount:targets.validCount??targets.length,invalidCount:targets.invalidCount||0,invalidTargets:targets.invalidTargets||[],filter:stage.filter};}catch(error){await context.close().catch(()=>{});throw error;}}));}
   if(req.method==='POST'&&path==='/api/bootstrap/login'){
     const input=await bodyJson(req);
-    const supervisorNip=employeeId(input.supervisorNip);
-    if(!supervisorNip)bad('NIP atasan wajib diisi');
-    const satker=clean(input.satker)||'Satker Lain';
-    const {employee,context,tempId}=await launchExternalBootstrap(satker,supervisorNip,input.department);
-    const flow={employee,context,createdAt:new Date().toISOString(),expiresAt:null,closing:false};
-    loginFlows.set(tempId,flow);
-    context.on('close', () => { if (loginFlows.get(tempId) === flow) { loginFlows.delete(tempId); rm(profilePath(tempId), { recursive: true, force: true }).catch(() => {}); } });
-    const page=context.pages()[0]??await context.newPage();
-    await page.goto(LLK_BASE,{waitUntil:'domcontentloaded'});
-    return json(res,200,{tempId,message:'Browser login dibuka. Silakan login akun LLK Anda.'});
+    const supervisorNip=input.supervisorNip;
+    if(typeof supervisorNip!=='string'||!/^\d{18}$/.test(supervisorNip))bad('NIP atasan wajib tepat 18 digit');
+    if(sessionBusy||locks.size||sessionEmployee||loginFlows.size)throw new HttpError(409,'Akhiri sesi sebelumnya sebelum login kembali.');
+    sessionBusy=true;
+    let tempId;
+    try{
+      const launched=await launchExternalBootstrap(input.satker,supervisorNip,input.department);
+      tempId=launched.tempId;
+      const {employee,context}=launched,flow={employee,context,createdAt:new Date().toISOString(),expiresAt:null,closing:false};
+      loginFlows.set(tempId,flow);
+      context.on('close',()=>{flow.closed=true;if(loginFlows.get(tempId)===flow&&!flow.completed&&!flow.completing)loginFlows.delete(tempId);});
+      const page=await context.newPage();
+      await page.goto(LLK_BASE,{waitUntil:'domcontentloaded'});
+      return json(res,200,{tempId,message:'Browser login dibuka. Silakan login akun LLK Anda.'});
+    }catch(error){if(tempId)await closeLoginFlow(tempId);throw error;}finally{sessionBusy=false;}
   }
   if(req.method==='GET'&&path==='/api/bootstrap/status'){
-    const active=[...loginFlows.entries()].filter(([id,flow])=>id.startsWith('temp-')&&!flow.closing).map(([tempId,flow])=>({tempId,authenticated:Boolean(authenticatedLlkPage(flow.context)),actualNip:flow.actualNip||null,fetchedAt:flow.fetchedAt||null,createdAt:flow.createdAt,expiresAt:flow.expiresAt}));
+    const active=[...loginFlows.entries()].filter(([,flow])=>!flow.completed&&!flow.closing&&!flow.closed).map(([tempId,flow])=>({tempId,authenticated:Boolean(authenticatedLlkPage(flow.context)),createdAt:flow.createdAt,expiresAt:flow.expiresAt}));
     return json(res,200,{active});
   }
   if(req.method==='POST'&&path==='/api/bootstrap/complete'){
     const input=await bodyJson(req),tempId=safeId(input.tempId);
-    let flow=loginFlows.get(tempId);
-    if(!flow)flow=[...loginFlows.entries()].find(([id,f])=>id.startsWith('temp-')&&!f.closing&&authenticatedLlkPage(f.context))?.[1]||null;
-    if(!flow){
-      const supervisorNip=employeeId(input.supervisorNip);
-      const employees=await getEmployees();
-      let recovered=null;
-      for(const emp of employees){
-        const cookies=await loadSessionCookies(emp.id);
-        if(!cookies?.length)continue;
-        const {context}=await launchEmployee(emp.id,true);
-        const page=context.pages()[0]??await context.newPage();
-        await page.goto(LLK_BASE,{waitUntil:'domcontentloaded',timeout:30000}).catch(()=>{});
-        if(llkLocation(page.url()).authenticated){recovered={employee:emp,context};break;}
-        await context.close();
-      }
-      if(!recovered)throw new HttpError(401,'Sesi LLK tidak ditemukan dari cookie tersimpan. Buka SSO dari profil aktif dan login sekali lagi.');
-      flow={employee:recovered.employee,context:recovered.context,createdAt:new Date().toISOString(),expiresAt:new Date(Date.now()+LOGIN_FLOW_TTL).toISOString(),closing:false,recovered:true};
-      loginFlows.set(tempId,flow);
-    }
-    return json(res,200,await completeExternalBootstrap(tempId,flow.employee,flow.context));
+    const flow=loginFlows.get(tempId);
+    if(!flow||flow.closing)throw new HttpError(401,'Sesi login tidak ditemukan. Mulai login SSO kembali.');
+    if(flow.completed)return json(res,200,flow.result);
+    if(flow.completing)return json(res,200,await flow.completing);
+    if(flow.closed)throw new HttpError(401,'Jendela login ditutup. Mulai login SSO kembali.');
+    if(sessionBusy||locks.size)throw new HttpError(409,'Operasi sesi sedang berjalan');
+    sessionBusy=true;
+    flow.completing=completeExternalBootstrap(tempId,flow.employee,flow.context);
+    try{return json(res,200,await flow.completing);}finally{flow.completing=null;sessionBusy=false;if(flow.closed&&!flow.completed)loginFlows.delete(tempId);}
   }
   const employeeRoute = path.match(/^\/api\/employees\/([^/]+)\/(.+)$/);
   if (!employeeRoute) return json(res,404,{error:'Endpoint tidak ditemukan'});
@@ -896,31 +832,20 @@ async function api(req,res,url) {
       }
     }));
   }
-  if (action === 'personal-template/apply' && req.method === 'POST') return json(res, 200, await applyPersonal(id, await bodyJson(req)));
-  if (action === 'personal-template' && req.method === 'DELETE') return json(res, 200, await resetPersonal(id, await bodyJson(req)));
-  if (action === 'login/status' && req.method === 'GET') {
-    const flow = loginFlows.get(id);
-    if (!flow || flow.closing) return json(res, 200, { active: false });
-    const pages = await pageDiagnostics(flow.context), authenticated = Boolean(authenticatedLlkPage(flow.context));
-    return json(res, 200, { active: true, authenticated, createdAt: flow.createdAt, expiresAt: flow.expiresAt, pages });
-  }
-  if (action === 'login/complete' && req.method === 'POST') return json(res, 200, await completeLogin(id));
-  if (action === 'login/cancel' && req.method === 'POST') return json(res, 200, { active: false, cancelled: await closeLoginFlow(id) });
-  if (action === 'login' && req.method === 'POST') return json(res, 200, await openLogin(id));
+  if (action === 'personal-template/apply' && req.method === 'POST') { const input=await bodyJson(req); return json(res,200,await withLock(id,()=>applyPersonal(id,input))); }
+  if (action === 'personal-template' && req.method === 'DELETE') { const input=await bodyJson(req); return json(res,200,await withLock(id,()=>resetPersonal(id,input))); }
   if (action === 'personal-template/import' && req.method === 'POST') return json(res, 200, await withLock(id, () => importPersonal(id)));
-  if (action === 'session/status' && req.method === 'GET') {
-    const flow = loginFlows.get(id);
-    if (flow && !flow.closing) await storeSessionCookies(id, await flow.context.cookies());
+  if (action === 'session/status' && req.method === 'GET') return json(res,200,await withLock(id,async()=>{
     const { context } = await launchEmployee(id, true);
     try {
       const page = context.pages()[0] ?? await context.newPage();
       const response = await page.goto(LLK_BASE, { waitUntil: 'domcontentloaded', timeout: 30000 });
       if (!response?.ok()) throw new HttpError(502, 'Status sesi belum dapat diperiksa. Coba periksa lagi.');
-      return json(res, 200, { authenticated: llkLocation(page.url()).authenticated, source: 'saved-session' });
+      return { authenticated: llkLocation(page.url()).authenticated, source: 'runtime-session' };
     } finally {
       await context.close();
     }
-  }
+  }));
   if (action === 'submit' && req.method === 'POST') {
     const input = await bodyJson(req);
     const report = await withLock(id, () => submitPreview(id, input.preview, input.duplicatePolicy));
@@ -931,9 +856,8 @@ async function api(req,res,url) {
 }
 
 const mime={'.html':'text/html; charset=utf-8','.css':'text/css; charset=utf-8','.js':'text/javascript; charset=utf-8','.json':'application/json'};
-await mkdir(DATA,{recursive:true,mode:0o700}); await mkdir(PROFILE_ROOT,{recursive:true,mode:0o700}); await mkdir(personalTemplateRoot,{recursive:true,mode:0o700}); await mkdir(personalHistoryRoot,{recursive:true,mode:0o700});
-for(const entry of await readdir(PROFILE_ROOT).catch(()=>[]))if(entry.startsWith('temp-'))await rm(join(PROFILE_ROOT,entry),{recursive:true,force:true}).catch(()=>{});
-if(process.platform!=='win32')await Promise.all([chmod(DATA,0o700),chmod(PROFILE_ROOT,0o700)]);
+await mkdir(DATA,{recursive:true,mode:0o700});
+if(process.platform!=='win32')await chmod(DATA,0o700);
 const server = createServer((req, res) => {
   void (async () => {
     try {
@@ -956,5 +880,5 @@ const server = createServer((req, res) => {
   });
 });
 server.listen(PORT,'127.0.0.1',()=>console.log(`LLK Agent PN Natuna: http://127.0.0.1:${PORT}`));
-let stopping=false;const shutdown=async()=>{if(stopping)return;stopping=true;await Promise.all([...loginFlows].map(([id,flow])=>closeLoginFlow(id,flow)));for(const id of stagedVerification.keys())closeVerificationStage(id);server.close(()=>process.exit(0));setTimeout(()=>process.exit(1),10_000).unref();};
+let stopping=false;const shutdown=async()=>{if(stopping)return;stopping=true;sessionBusy=true;setTimeout(()=>process.exit(1),10_000).unref();await clearSession();server.close(()=>process.exit(0));};
 process.on('SIGINT',shutdown);process.on('SIGTERM',shutdown);

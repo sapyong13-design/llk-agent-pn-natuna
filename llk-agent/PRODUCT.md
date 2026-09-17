@@ -27,11 +27,12 @@ Agent lokal yang memakai sesi browser asli pegawai (profil Edge terpisah per peg
 ## Capabilities and Constraints
 
 - Workflow boleh dirapikan; fitur dan aturan tetap (persetujuan pengguna 15 September 2026). Dua pilihan utama: Buat LLK dan Verifikasi LLK Anggota. Sesi SSO tersedia dari header; satu tahap kerja tampil. Buat LLK tetap melalui tanggal, pratinjau/edit, dan konfirmasi kirim. Verifikasi melalui daftar, pesan, tindakan, dan hasil. Istilah resmi tetap.
-- Pintu masuk memakai akun terakhir pada browser lokal. Sesi aktif langsung menampilkan pilihan pekerjaan tanpa tombol Lanjut; kedaluwarsa meminta login; error pemeriksaan menawarkan coba lagi. Pemilih akun berpencarian menjadi satu akses akun. Ganti pekerjaan mempertahankan draf, sedangkan pergantian akun meminta konfirmasi dan menghapus konteks draf sebelumnya. Tahap tampil sebagai indikator, bukan tombol navigasi duplikat. Hasil menggantikan formulir tindakan; tombol verifikasi menyebut jumlah LLK siap.
-- Profil per pegawai = konteks browser terpisah; nama, satker, atasan dibaca otomatis dari akun SSO.
+- Pintu masuk: NIP atasan langsung 18 digit, Login SSO, lalu identitas dan kegiatan dibaca otomatis. Tidak ada pemilih akun tersimpan. Refresh meneruskan sesi runtime; Akhiri sesi menghapus identitas, cookie, dan draf sementara.
+- Log aktivitas tetap terbuka, kronologis, dengan penyamaran token dan gulir mengikuti hanya saat pembaca berada di bawah. Daftar kegiatan berada dekat sumber isian.
+- Identitas pegawai, cookie, dan template pribadi baru hanya dalam memori proses. Data profil lama tidak dipakai dan tidak dihapus. Laporan pengiriman serta audit lokal tetap disimpan.
 - Sumber kegiatan: kegiatan unik dari halaman terakhir akun, atau template umum per bagian pengadilan.
 - Verifikasi LLK anggota & kirim dari dalam aplikasi; log & laporan lokal (JSON, bisa diekspor).
-- Otomasi hanya jalan di Edge; cookie sesi lokal di `data/`.
+- Otomasi menggunakan browser Chromium yang tersedia; sesi berakhir ketika proses LLK Agent berhenti, bukan ketika tab aplikasi ditutup.
 
 ## Brand Commitments
 

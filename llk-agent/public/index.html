@@ -10,13 +10,6 @@
   <link rel="stylesheet" href="/redesign.css">
 </head>
 <body>
-  <!--
-    THESIS: LLK is a living official document, not a generic dashboard; refuse floating-card SaaS chrome.
-    OWN-WORLD: cool security paper, blue-black ink, one seal-red accent, guilloche, microtext, perforation.
-    FIRST VIEWPORT: compact court letterhead above task mode, step navigation, and one active workflow sheet.
-    SIGNATURE: dates repeat as specimen numerals; successful states receive one deterministic landing-stamp motion.
-    RESPONSIVE: calendar and selection summary stack while retaining tabular data and clear three-step position.
-  -->
   <main class="shell" id="application">
     <header class="court-header">
       <div class="court-identity">
@@ -24,11 +17,6 @@
         <p id="satkerSelect" hidden></p>
       </div>
       <div class="header-actions">
-        <button class="btn btn-sm" id="themeToggleBtn" type="button" aria-label="Ganti mode terang/gelap" title="Ganti mode terang/gelap">
-          <svg class="theme-icon-sun" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
-          <svg class="theme-icon-moon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
-          <span class="theme-toggle-label">Tema</span>
-        </button>
         <div class="profile-chip">
           <span class="profile-dot" aria-hidden="true"></span>
           <div class="profile-meta">
@@ -38,6 +26,11 @@
           <span class="court-badge" id="loginBadge">Belum masuk</span>
         </div>
         <button class="btn btn-sm btn-outline" id="endSessionBtn" type="button" hidden>Akhiri sesi</button>
+        <button class="btn btn-sm" id="themeToggleBtn" type="button" aria-label="Ganti mode terang/gelap" title="Ganti mode terang/gelap">
+          <svg class="theme-icon-sun" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+          <svg class="theme-icon-moon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+          <span class="theme-toggle-label">Tema</span>
+        </button>
       </div>
     </header>
 
@@ -45,25 +38,41 @@
     <p id="operationStatus" class="inline-feedback" role="status" aria-live="polite" hidden></p>
     <form id="employeeForm" aria-labelledby="onboardingTitle">
       <div class="step-heading">
-        <h2 id="onboardingTitle">Masukkan NIP atasan langsung</h2>
-        <p>Login SSO untuk membaca identitas pegawai dan kegiatan LLK secara otomatis.</p>
+        <h2 id="onboardingTitle">Mulai sesi LLK</h2>
+        <p>Login menggunakan akun SSO Anda sendiri untuk menyiapkan LLK atau memverifikasi LLK anggota.</p>
       </div>
-      <label for="quickSupervisorNip">NIP atasan langsung</label>
-      <input class="form-control" id="quickSupervisorNip" name="supervisorNip" inputmode="numeric" pattern="[0-9]{18}" minlength="18" maxlength="18" autocomplete="off" aria-describedby="quickSupervisorHelp" placeholder="18 digit NIP atasan langsung" required disabled>
-      <small class="field-help" id="quickSupervisorHelp">Atasan langsung yang berwenang memverifikasi LLK. Sesi hanya berlaku selama LLK Agent berjalan.</small>
+      <label for="quickSupervisorNip">NIP atasan yang memeriksa LLK Anda</label>
+      <input class="form-control" id="quickSupervisorNip" name="supervisorNip" inputmode="numeric" pattern="[0-9]{18}" minlength="18" maxlength="18" autocomplete="off" aria-describedby="quickSupervisorHelp" placeholder="18 digit" required disabled>
+      <small class="field-help" id="quickSupervisorHelp">Gunakan NIP pemeriksa LLK, bukan NIP Anda sendiri.</small>
       <p id="onboardingStatus" role="status" aria-live="polite">Memeriksa sesi…</p>
       <div class="button-row">
         <button class="btn btn-primary" id="quickSsoLoginBtn" type="submit" disabled>Login SSO</button>
         <button class="btn btn-outline" id="quickSsoRetryBtn" type="button" hidden>Coba lagi</button>
       </div>
+      <p class="field-help">Sesi tidak disimpan permanen. Laporan pengiriman tetap tersimpan lokal.</p>
     </form>
 
 
     <div id="workspace" hidden>
+      <section class="examiner-panel" id="sessionVerifier" aria-labelledby="examinerLabel">
+        <div class="examiner-identity">
+          <h2 id="examinerLabel">Pemeriksa LLK Anda</h2>
+          <strong id="examinerName">Nama belum terbaca</strong>
+          <p class="examiner-nip">NIP <span id="examinerNip">—</span></p>
+        </div>
+        <span class="examiner-badge" id="examinerStatus">Belum terkonfirmasi dari LLK</span>
+        <p class="examiner-help">Pastikan nama dan NIP sesuai atasan yang memeriksa LLK Anda sebelum mengirim. Jika tidak sesuai, akhiri sesi lalu login dengan NIP atasan yang benar.</p>
+      </section>
+      <p class="field-help">Refresh mempertahankan sesi selama LLK Agent berjalan, tetapi draf isian dan pesan belum dikirim akan hilang.</p>
             <div class="mode-switch" id="workChoices" role="radiogroup" aria-label="Pilih pekerjaan" hidden>
               <label class="mode-option"><input type="radio" name="workflowMode" value="create"> <span><strong>Buat LLK</strong></span></label>
               <label class="mode-option"><input type="radio" name="workflowMode" value="verify"> <span><strong>Verifikasi LLK Anggota</strong></span></label>
             </div>
+      <nav id="createStageNav" class="create-stage-nav" aria-label="Tahap pembuatan LLK" hidden>
+        <span data-create-stage="dates" aria-current="step">1. Tanggal</span>
+        <span data-create-stage="preview">2. Periksa &amp; kirim</span>
+        <span data-create-stage="result">3. Hasil</span>
+      </nav>
       <ol class="workflow" aria-label="Alur pengisian LLK">
 
         <li class="workflow-step" id="stepDates" data-step="2">
@@ -74,6 +83,10 @@
                 <h2 id="workTitle">Pilih tanggal LLK</h2>
                 <p id="workHint">Tentukan rentang tanggal, lalu siapkan isian otomatis.</p>
               </div>
+            </div>
+            <div id="dateSelectionSummary" class="date-selection-summary" hidden>
+              <p id="selectedRangeText"></p>
+              <button class="btn btn-sm btn-outline" id="changeDatesBtn" type="button">Ubah tanggal</button>
             </div>
             <div class="date-controls" id="createLlkMode">
               <div class="preset-row" aria-label="Pilihan cepat tanggal">
@@ -90,6 +103,11 @@
                     <strong id="calendarMonthTitle"></strong>
                     <button class="quiet-action calendar-nav" id="calendarNextBtn" type="button" aria-label="Bulan berikutnya">Berikutnya</button>
                   </header>
+                  <div class="calendar-entries-toolbar">
+                    <strong>Isian LLK · halaman 1</strong>
+                    <button class="btn btn-sm btn-outline" id="refreshCalendarEntriesBtn" type="button" aria-describedby="calendarEntriesStatus calendarEntriesScope">Perbarui isian LLK</button>
+                  </div>
+                  <p class="calendar-entries-status" id="calendarEntriesStatus" role="status" aria-live="polite">Belum diperiksa.</p>
                   <div class="calendar-weekdays" aria-hidden="true"><span>Sen</span><span>Sel</span><span>Rab</span><span>Kam</span><span>Jum</span><span>Sab</span><span>Min</span></div>
                   <div class="calendar-grid" id="calendarGrid"></div>
                   <div class="calendar-legend" aria-label="Keterangan kalender">
@@ -97,7 +115,9 @@
                     <span><i class="legend-collective"></i>Cuti bersama</span>
                     <span><i class="legend-weekend"></i>Sabtu/Minggu</span>
                     <span><i class="legend-selected"></i>Rentang dipilih</span>
+                    <span><i class="legend-occupied" aria-hidden="true"></i>Terisi: Terisi di halaman 1</span>
                   </div>
+                  <p class="calendar-entries-scope" id="calendarEntriesScope">Tanggal tanpa label Terisi: <strong id="calendarUnmarkedStatus">Belum diperiksa</strong>. Hanya halaman 1 LLK yang dibaca; tanggal lain mungkin ada di halaman berikutnya.</p>
                 </section>
                 <div class="date-summary">
                   <div class="range-fields" aria-live="polite">
@@ -175,7 +195,8 @@
               <p id="wizardVerificationCount">Cari LLK anggota yang belum terverifikasi.</p>
               <div class="form-group" hidden>
                 <label for="wizardVerificationMessage">Pesan verifikasi</label>
-                <textarea class="form-control" id="wizardVerificationMessage" rows="3" placeholder="Contoh: Terima kasih, kegiatan telah sesuai."></textarea>
+                <textarea class="form-control" id="wizardVerificationMessage" rows="3" aria-describedby="verificationMessageHelp" placeholder="Contoh: Terima kasih, kegiatan telah sesuai." required></textarea>
+                <small class="field-help" id="verificationMessageHelp">Wajib diisi. Pesan berlaku untuk LLK yang akan diverifikasi.</small>
               </div>
               <div class="button-row">
                 <button class="btn btn-primary" id="refreshWizardVerificationBtn" type="button">Cari LLK anggota</button>
@@ -202,6 +223,7 @@
               <p id="previewFeedback" class="validation-feedback" role="alert" hidden></p>
               <div id="previewCards" class="preview-cards"></div>
               <div class="send-bar">
+                <div class="send-options">
                 <div class="form-group compact-field">
                   <label for="duplicatePolicy">Tanggal sudah ada</label>
                   <select class="form-control" id="duplicatePolicy">
@@ -212,9 +234,10 @@
                 <label class="check-row">
                   <input type="checkbox" id="confirmCheck"> Saya sudah memeriksa isian dan memastikan sesuai pekerjaan nyata.
                 </label>
+                </div>
                 <div class="send-action">
-                  <small id="sendReadiness">Centang konfirmasi untuk mengirim.</small>
-                  <button class="btn btn-primary send-button" id="submitBtn" disabled>Kirim ke LLK</button>
+                  <small id="sendReadiness" aria-live="polite">Centang konfirmasi untuk mengirim.</small>
+                  <button class="btn btn-primary send-button" id="submitBtn" type="button" aria-describedby="sendReadiness" disabled>Kirim ke LLK</button>
                 </div>
               </div>
             </div>

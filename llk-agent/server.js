@@ -17,6 +17,7 @@ const sensitiveKeys = /password|cookie|csrf|token|secret|authorization/i;
 const locks = new Set();
 const stagedPersonal = new Map();
 const personalTemplates = new Map();
+const calendarEntries = new Map();
 const sessionBrowsers = new Set();
 let sessionEmployee = null;
 let sessionBusy = false;
@@ -164,6 +165,7 @@ async function clearSession() {
   sessionEmployee = null;
   sessionCookies.clear();
   personalTemplates.clear();
+  calendarEntries.clear();
   stagedPersonal.clear();
   operationProgress.clear();
 }
@@ -267,7 +269,13 @@ async function navigateFeature(page,url){
   return location.url.pathname===target.pathname||location.url.href===target.href?{available:true}:{available:false,reason:'llk-redirect'};
 }
 
-async function scrapeEntries(context, existingPage) {
+function cacheCalendarEntries(id, entries) {
+  const snapshot = { dates: [...new Set(entries.map(entry => entry.date).filter(date => /^\d{4}-\d{2}-\d{2}$/.test(date)))].sort(), scope: 'page-1', available: entries.available !== false, fetchedAt: new Date().toISOString() };
+  if (!snapshot.available) snapshot.warning = 'Daftar LLK halaman 1 belum dapat dibaca. Tanggal yang tidak terlihat bukan berarti kosong.';
+  if (id) calendarEntries.set(id, snapshot);
+  return snapshot;
+}
+async function scrapeEntries(context, existingPage, id = sessionEmployee?.id) {
   const page = existingPage || await context.newPage(), owned = !existingPage;
   try {
     if (!llkLocation(page.url()).authenticated) {
@@ -279,15 +287,18 @@ async function scrapeEntries(context, existingPage) {
       const empty = [];
       empty.available = false;
       empty.warning = 'Menu LLK tidak ditemukan pada halaman akun aktif.';
+      cacheCalendarEntries(id, empty);
       return empty;
     }
-    await llkMenu.click();
-    await page.waitForURL(url => url.origin === LLK_BASE && /\/llk(?:\/|$|\?)/i.test(url.pathname + url.search), { timeout: 15000 }).catch(() => {});
-    await page.waitForLoadState('domcontentloaded').catch(() => {});
+    await Promise.all([
+      page.waitForURL(url => url.origin === LLK_BASE && /^\/llk(?:\/|$)/.test(url.pathname), { waitUntil: 'domcontentloaded', timeout: 60000 }),
+      llkMenu.evaluate(link => link.click())
+    ]);
     if (!/^\/llk(?:\/|$)/i.test(new URL(page.url()).pathname)) {
       const empty = [];
       empty.available = false;
       empty.warning = `Menu LLK tidak membuka daftar kegiatan: ${page.url()}.`;
+      cacheCalendarEntries(id, empty);
       return empty;
     }
     await page.locator('table').first().waitFor({ state: 'visible', timeout: 15000 }).catch(() => {});
@@ -296,6 +307,7 @@ async function scrapeEntries(context, existingPage) {
       const cleanText = value => String(value || '').replace(/\s+/g, ' ').trim();
       const tables = [...document.querySelectorAll('table')];
       const output = [];
+      let recognized = false;
       for (const table of tables) {
         const headerRow = [...table.rows].find(row => [...row.cells].some(cell => /^(?:jam|waktu|kegiatan|uraian|aktivitas|jenis|hasil(?:\/volume)?|output)$/i.test(cleanText(cell.textContent))));
         if (!headerRow) continue;
@@ -303,6 +315,7 @@ async function scrapeEntries(context, existingPage) {
         const indexFor = pattern => headers.findIndex(header => pattern.test(header));
         const timeIndex = indexFor(/^jam$|^waktu$/), activityIndex = indexFor(/^kegiatan$|^uraian$|^aktivitas$/), typeIndex = indexFor(/^jenis$/), resultIndex = indexFor(/^hasil(?:\/volume)?$|^output$/);
         if (timeIndex < 0 || activityIndex < 0 || typeIndex < 0 || resultIndex < 0) continue;
+        recognized = true;
         for (const row of [...table.rows].slice(headerRow.rowIndex + 1)) {
           if (row.querySelector('table')) continue;
           const cells = [...row.cells].map(cell => cleanText(cell.textContent));
@@ -318,19 +331,23 @@ async function scrapeEntries(context, existingPage) {
           output.push({ rawDate, start: times[0], end: times[1], description, type, result, isBreak });
         }
       }
-      return output;
+      return { rows: output, recognized };
     });
-    const normalized = entries.map(entry => ({ ...entry, date: normalizeOfficialDate(entry.rawDate) }));
+    const normalized = entries.rows.map(entry => ({ ...entry, date: normalizeOfficialDate(entry.rawDate) }));
     normalized.sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
-    normalized.available = true;
+    normalized.available = entries.recognized;
+    if (!normalized.available) normalized.warning = 'Tabel kegiatan LLK halaman pertama tidak ditemukan.';
     normalized.sourceUrl = sourceUrl;
     normalized.pagesScanned = 1;
+    cacheCalendarEntries(id, normalized);
     return normalized;
+  } catch (error) {
+    if (id) calendarEntries.delete(id);
+    throw error;
   } finally {
     if (owned) await page.close();
   }
 }
-const entryKey=e=>canonical({date:e.date,start:clean(e.start),end:clean(e.end),description:clean(e.description),type:clean(e.type).replace(/^primary$/i,'Utama').replace(/^support$/i,'Pendukung'),result:clean(e.result)});
 async function extractCsrfToken(page, context) {
   const selectors = ['input[name="_token"]', 'input[name="csrf_token"]', 'input[name="_csrf"]', 'meta[name="csrf-token"]'];
   for (const sel of selectors) {
@@ -347,11 +364,22 @@ async function extractCsrfToken(page, context) {
   }
   throw new Error('CSRF token tidak ditemukan pada halaman LLK');
 }
+function submissionResponseInfo(response) {
+  const headers = response.headers(), mediaType = String(headers['content-type'] || '').split(';', 1)[0].trim().toLowerCase();
+  const info = { status: response.status(), contentType: ['text/html', 'application/json', 'text/plain'].includes(mediaType) ? mediaType : 'other', redirect: 'none' };
+  if (headers.location) {
+    try {
+      const target = new URL(headers.location, LLK_BASE);
+      info.redirect = target.origin !== LLK_BASE ? 'external' : /^\/llk\/?$/.test(target.pathname) ? 'llk-list' : /^\/llk\/create\/?$/.test(target.pathname) ? 'llk-create' : /\/(?:login|sso|auth)(?:\/|$)/i.test(target.pathname) ? 'authentication' : 'other';
+    } catch { info.redirect = 'invalid'; }
+  }
+  return info;
+}
 async function submitPreview(id, rawPreview, policy) {
   const preview = await validatePreview(rawPreview); if (!['skip','abort'].includes(policy)) bad('duplicatePolicy harus skip atau abort');
   const { employee, context } = await launchEmployee(id), report={ at:new Date().toISOString(), employee:{id:employee.id,name:employee.name}, duplicatePolicy:policy, results:[] };
   try {
-    const existingEntries=await scrapeEntries(context),existing=new Set(existingEntries.map(entryKey)),existingDates=new Set(existingEntries.map(entry=>entry.date));
+    const existingEntries=await scrapeEntries(context),existingDates=new Set(existingEntries.map(entry=>entry.date));
     const duplicateDates=preview.filter(day=>existingDates.has(day.date)).map(day=>day.date);
     if (duplicateDates.length && policy==='abort') {
       report.results=preview.map(day=>({date:day.date,state:duplicateDates.includes(day.date)?'skipped':'ready',status:duplicateDates.includes(day.date)?'duplicate':'ready',statusLabel:duplicateDates.includes(day.date)?'Tanggal sudah ada di LLK':'Belum dikirim',submitted:false,skipped:duplicateDates.includes(day.date),failed:false,verified:duplicateDates.includes(day.date),error:duplicateDates.includes(day.date)?'Tanggal sudah memiliki LLK pada halaman pertama; pengiriman seluruh rentang dibatalkan':undefined}));
@@ -367,25 +395,32 @@ async function submitPreview(id, rawPreview, policy) {
       return report;
     }
     const page = await context.newPage();
-    await openLlkCreateForm(page);
-    const token = await extractCsrfToken(page, context);
-    const selectedSupervisor = await resolveLlkSupervisor(page, employeeId(employee.supervisor.nip) || employee.supervisor.id);
-    const liveSupervisor = { id: selectedSupervisor.id, nip: selectedSupervisor.nip, name: selectedSupervisor.name, fields: { nip: 'live-page-fetch', name: 'live-page-fetch' } };
-    if (!employeeId(liveSupervisor.nip) || !liveSupervisor.id || !liveSupervisor.name) throw new Error('Lookup atasan tidak lengkap. Pengiriman dibatalkan.');
-    employee.supervisor = { id: liveSupervisor.id, nip: liveSupervisor.nip, name: liveSupervisor.name, verified: true, source: 'llk-select2' };
+    const supervisorNip = employeeId(employee.supervisor.nip);
     for (const day of preview) {
+      progress(id, 'send-date', `Memproses ${day.date} (${report.results.length + 1}/${preview.length})…`, { status: 'Berjalan' });
       if (existingDates.has(day.date)) {
         report.results.push({date:day.date,state:'skipped',status:'duplicate',statusLabel:'Sudah ada di LLK',message:'Dilewati karena tanggal sudah memiliki LLK di halaman pertama',submitted:false,skipped:true,failed:false,verified:true,itemCount:day.items.length});
+        progress(id, 'send-result', `${day.date}: dilewati karena sudah ada di halaman 1 LLK.`, { status: 'Info' });
         continue;
       }
       const result={date:day.date,state:'failed',status:'failed',statusLabel:'Gagal dikirim',submitted:false,skipped:false,failed:true,verified:false,itemCount:day.items.length,payload:{date:day.date,items:day.items}};
+      let submissionStarted = false;
       try {
+        if (!/^\d{18}$/.test(supervisorNip)) throw new Error('NIP atasan tidak valid. Pengiriman dibatalkan.');
+        await openLlkCreateForm(page);
+        const liveSupervisor = await resolveLlkSupervisor(page, supervisorNip);
+        if (liveSupervisor.nip !== supervisorNip || !liveSupervisor.id || !liveSupervisor.name) throw new Error('Lookup atasan tidak lengkap. Pengiriman dibatalkan.');
+        employee.supervisor = { id: liveSupervisor.id, nip: liveSupervisor.nip, name: liveSupervisor.name, verified: true, source: 'llk-select2' };
+        const token = await extractCsrfToken(page, context);
         const [year,month,date]=day.date.split('-');
         const payload=new URLSearchParams({redirect:`${LLK_BASE}/llk`,_token:token,'author[name]':employee.name,'author[nip]':employee.nip,'author[jabatan_text]':employee.position,'supervisor[nip]':liveSupervisor.id,'supervisor[name]':liveSupervisor.name,activity_date:`${date}-${month}-${year}`});
         for (const item of day.items) { payload.append('items[start_time][]',item.start); payload.append('items[end_time][]',item.end); payload.append('items[description][]',item.description); payload.append('items[type][]',item.type==='Utama'?'primary':'support'); payload.append('items[result][]',item.result); payload.append('items[note][]',''); payload.append('items[id][]',''); }
-        const response=await context.request.post(`${LLK_BASE}/llk/save`,{headers:{'content-type':'application/x-www-form-urlencoded',referer:`${LLK_BASE}/llk/create`},data:payload.toString(),maxRedirects:0});
-        result.httpStatus=response.status();
-        result.submitted = response.status() === 303;
+        calendarEntries.delete(id);
+        submissionStarted = true;
+        const response=await context.request.post(`${LLK_BASE}/llk/save`,{headers:{'content-type':'application/x-www-form-urlencoded',referer:`${LLK_BASE}/llk/create`},data:payload.toString(),maxRedirects:0,maxRetries:0});
+        const responseInfo = submissionResponseInfo(response);
+        result.httpStatus = responseInfo.status;
+        result.submitted = responseInfo.status === 303 && responseInfo.redirect === 'llk-list';
         if (result.submitted) {
           result.state = 'saved';
           result.status = 'awaiting_supervisor';
@@ -394,25 +429,36 @@ async function submitPreview(id, rawPreview, policy) {
           result.failed = false;
         } else {
           result.state = 'failed';
-          result.status = 'failed';
-          result.statusLabel = 'Gagal';
+          result.status = result.httpStatus === 403 ? 'forbidden' : 'failed';
+          result.statusLabel = result.httpStatus === 403 ? 'Ditolak LLK (HTTP 403)' : 'Gagal';
           result.failed = true;
-          result.error = `HTTP respons ${response.status()}`;
+          result.responseInfo = responseInfo;
+          result.error = result.httpStatus === 403
+            ? 'HTTP 403: LLK menolak pengiriman. Penyebab belum dapat dipastikan (sesi, izin, atau perlindungan permintaan). Form dan CSRF sudah dimuat ulang untuk tanggal ini. Tidak dicoba ulang; periksa LLK sebelum mengirim kembali.'
+            : `HTTP ${result.httpStatus}: respons simpan tidak terkonfirmasi. Tidak dicoba ulang; periksa LLK sebelum mengirim kembali.`;
         }
       } catch (error) {
-        result.error = clean(error.message).slice(0,500);
-        result.statusLabel = 'Gagal koneksi';
+        result.error = clean(error.message).replace(/\x1b\[[0-9;]*m/g, '').slice(0,500);
+        result.status = submissionStarted ? 'uncertain' : 'not_attempted';
+        result.statusLabel = submissionStarted ? 'Belum pasti' : 'Belum dikirim';
+        result.message = submissionStarted ? 'Status pengiriman belum dapat dipastikan. Periksa LLK sebelum mencoba lagi.' : 'Formulir LLK belum berhasil disiapkan. Tidak ada permintaan pengiriman untuk tanggal ini.';
       }
       report.results.push(result);
+      progress(id, 'send-result', `${day.date}: ${result.submitted ? 'tersimpan di LLK, menunggu verifikasi atasan.' : result.status === 'not_attempted' ? 'belum dikirim; formulir gagal disiapkan.' : result.status === 'uncertain' ? 'hasil belum pasti; periksa LLK sebelum mengirim ulang.' : 'gagal dikirim. ' + result.error}`, { status: result.submitted ? 'Selesai' : 'Gagal' });
       await saveJson(reportFile(id), report);
-      if (result.failed) break;
+      if (result.failed) {
+        for (const remaining of preview.slice(report.results.length)) report.results.push({ date: remaining.date, state: 'skipped', status: 'not_attempted', statusLabel: 'Belum dikirim', message: 'Pengiriman dihentikan setelah kegagalan sebelumnya; tidak dicoba ulang.', submitted: false, skipped: true, failed: false, verified: false, itemCount: remaining.items.length });
+        break;
+      }
     }
     report.success = report.results.filter(item => item.submitted && !item.skipped).length;
     report.skipped = report.results.filter(item => item.skipped).length;
     report.failed = report.results.filter(item => item.failed).length;
     await saveJson(reportFile(id), report);
     return report;
-  } finally { await context.close(); }
+  } finally {
+    try { storeSessionCookies(id, await context.cookies()); } finally { await context.close(); }
+  }
 }
 function slug(text) { return clean(text).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,''); }
 async function importVerifier(id, existingContext, existingPage){
@@ -440,7 +486,7 @@ async function personalResponse(employee){const personal=await readPersonal(empl
 async function importPersonal(id, existingContext, existingPage) {
   const owned = !existingContext, { context } = existingContext ? { context: existingContext } : await launchEmployee(id);
   try {
-    const entries = await scrapeEntries(context, existingPage), current = await readPersonal(id);
+    const entries = await scrapeEntries(context, existingPage, id), current = await readPersonal(id);
     if (entries.available === false) return { available: false, current, candidate: null, warning: entries.warning || 'Tahap riwayat: data LLK tidak tersedia; template pribadi tidak diubah.' };
     const seen = new Map();
     for (const entry of Array.isArray(entries) ? entries : []) {
@@ -465,15 +511,17 @@ async function openLlkCreateForm(page) {
   await page.goto(LLK_BASE, { waitUntil: 'domcontentloaded', timeout: 60000 });
   const llkMenu = page.locator('a[href="/llk"], a[href="https://llk.mahkamahagung.go.id/llk"]').first();
   if (!await llkMenu.count()) throw new Error('Menu LLK tidak ditemukan dari dashboard');
-  await llkMenu.click();
-  await page.waitForURL(url => url.origin === LLK_BASE && /\/llk(?:\/|$|\?)/i.test(url.pathname + url.search), { timeout: 15000 }).catch(() => {});
-  await page.waitForLoadState('domcontentloaded').catch(() => {});
+  await Promise.all([
+    page.waitForURL(url => url.origin === LLK_BASE && /^\/llk(?:\/|$)/.test(url.pathname), { waitUntil: 'domcontentloaded', timeout: 60000 }),
+    llkMenu.evaluate(link => link.click())
+  ]);
   if (!/^\/llk(?:\/|$)/i.test(new URL(page.url()).pathname)) throw new Error(`Menu LLK tidak membuka daftar LLK: ${page.url()}`);
   const createLink = page.locator('a[href="https://llk.mahkamahagung.go.id/llk/create"], a[href="/llk/create"]').first();
   if (!await createLink.count()) throw new Error(`Tombol buat LLK tidak ditemukan: ${page.url()}`);
-  await createLink.click();
-  await page.waitForURL(url => url.origin === LLK_BASE && /^\/llk\/create(?:\/|$|\?)/i.test(url.pathname + url.search), { timeout: 15000 });
-  await page.waitForLoadState('domcontentloaded');
+  await Promise.all([
+    page.waitForURL(url => url.origin === LLK_BASE && /^\/llk\/create(?:\/|$)/.test(url.pathname), { waitUntil: 'domcontentloaded', timeout: 60000 }),
+    createLink.evaluate(link => link.click())
+  ]);
   if (!await page.locator('#snip, [name="supervisor[nip]"]').count()) throw new Error('Kontrol NIP Pejabat Atasan tidak ditemukan pada form buat LLK');
 }
 
@@ -812,6 +860,16 @@ async function api(req,res,url) {
   const id = safeId(decodeURIComponent(employeeRoute[1]));
   const action = employeeRoute[2];
   if(action==='personal-template'&&req.method==='GET')return json(res,200,await personalResponse(await findEmployee(id)));
+  if (action === 'calendar-entries' && req.method === 'GET') return json(res, 200, await withLock(id, async () => {
+    if (url.searchParams.get('refresh') !== '1' && calendarEntries.has(id)) return calendarEntries.get(id);
+    calendarEntries.delete(id);
+    const { context } = await launchEmployee(id);
+    try {
+      await scrapeEntries(context, undefined, id);
+      storeSessionCookies(id, await context.cookies());
+      return calendarEntries.get(id);
+    } finally { await context.close(); }
+  }));
   if (action === 'preview' && req.method === 'POST') {
     const input = await bodyJson(req);
     return json(res, 200, await withLock(id, async () => {

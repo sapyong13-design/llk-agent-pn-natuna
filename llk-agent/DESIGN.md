@@ -12,15 +12,17 @@ Arah dipilih pengguna: modern netral. Mode antarmuka: Operate. Identitas dokumen
 
 ## Susunan
 
-Header ringkas: nama aplikasi, identitas akun, status sesi, Ganti akun, tema. Pada seluler identitas mendapat satu baris penuh.
+Header ringkas: nama aplikasi, identitas akun, status sesi, Akhiri sesi, tema. Pada seluler identitas mendapat satu baris penuh. Onboarding memakai judul Mulai sesi LLK, satu kolom NIP atasan, status nyata, serta satu tombol utama.
 
 Dua pilihan workflow berupa tab bergaris bawah. Radio native tetap menjaga interaksi keyboard; fokus terlihat.
 
-Buat LLK: kalender kiri, ringkasan tanggal dan hari kerja kanan, kemudian sumber kegiatan dan Kelola daftar kegiatan. Pada seluler urut vertikal. Pratinjau dan konfirmasi tetap di halaman sama.
+Buat LLK memiliki tahap Tanggal, Periksa & kirim, Hasil. Kalender kiri dan pengaturan kanan; kalender diringkas setelah pratinjau. Ubah tanggal mempertahankan edit sampai rentang benar-benar berubah. Tombol kirim menyebut jumlah hari dan alasan jika belum dapat digunakan. Seluler mengikuti urutan baca vertikal.
 
-Verifikasi: daftar dan status terpisah secara visual, rincian bisa dibuka. Filter, pesan, dan tindakan tetap memakai kontrak aplikasi.
+Identitas pemeriksa mendapat panel tersendiri: nama tebal, NIP terpisah, status konfirmasi dari LLK, serta petunjuk memeriksa kecocokan. Kalender menandai tanggal yang terlihat di halaman pertama dengan Terisi. Tanggal tanpa penanda bukan bukti kosong; cakupan halaman 1, waktu pembacaan, dan Perbarui isian LLK selalu dijelaskan. Data gagal dibaca tidak dianggap kosong.
 
-Log selalu terbuka di bawah area kerja. Desktop memakai waktu, status, aktivitas. Seluler memindahkan aktivitas ke baris penuh. Isi log ditulis sebagai teks, token disamarkan, gulir mengikuti hanya jika pembaca berada dekat bawah.
+Verifikasi dikelompokkan per pegawai dengan tanggal dan rincian. Siap dan ditahan terpisah. Hasil membedakan berhasil, gagal terbukti, dan belum pasti; belum pasti memakai warna amber serta instruksi pindai ulang, tanpa pengiriman ulang otomatis. Pesan wajib berada dekat tindakan.
+
+Log selalu terbuka, tinggi mengikuti isi hingga batas gulir; tidak menyediakan kotak kosong besar. Desktop memakai waktu, status, aktivitas. Seluler memindahkan aktivitas ke baris penuh. Isi log ditulis sebagai teks, token disamarkan, gulir mengikuti hanya jika pembaca berada dekat bawah. Hasil pekerjaan tetap tersedia di area utama.
 
 ## Batas
 

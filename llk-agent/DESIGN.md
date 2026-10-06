@@ -20,6 +20,8 @@ Sesi diikat ke cookie browser; tab satu profil berbagi sesi, profil terpisah tid
 
 Privasi berlaku untuk lokal maupun hosting: backend aplikasi meneruskan kredensial ke SSO resmi lewat HTTPS; cookie SSO hanya di memori server aplikasi. CSP mengizinkan script lokal dan hash script tema inline yang tetap; jangan mengubah script tema tanpa memperbarui hash server. Pesan 429 memberi petunjuk menunggu, bukan mengulang autentikasi otomatis.
 
+429 menampilkan jumlah detik menunggu dari Retry-After. Verifikasi yang ditolak limiter disebut belum dikirim, bukan hasil belum pasti. Login tetap SSO biasa tanpa gateway pegawai tambahan.
+
 Dua pilihan workflow berupa tab bergaris bawah. Radio native tetap menjaga interaksi keyboard; fokus terlihat.
 
 Buat LLK memiliki tahap Tanggal, Periksa & kirim, Hasil. Kalender kiri dan pengaturan kanan; kalender diringkas setelah pratinjau. Ubah tanggal mempertahankan edit sampai rentang benar-benar berubah. Tombol kirim menyebut jumlah hari dan alasan jika belum dapat digunakan. Seluler mengikuti urutan baca vertikal.

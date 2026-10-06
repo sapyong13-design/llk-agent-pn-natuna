@@ -101,6 +101,12 @@ async function api(path, options = {}) {
   if (!response.ok) {
     const error = new Error(data.error || `Permintaan gagal (${response.status})`);
     error.status = response.status;
+    if (response.status === 429) {
+      const retryAfter = Number(response.headers.get('Retry-After'));
+      error.recovery = Number.isFinite(retryAfter) && retryAfter > 0
+        ? `Tunggu ${Math.ceil(retryAfter)} detik sebelum mencoba lagi. Permintaan yang ditolak tidak dikirim ke LLK; tidak dicoba ulang otomatis.`
+        : 'Tunggu sebelum mencoba lagi. Permintaan yang ditolak tidak dikirim ke LLK; tidak dicoba ulang otomatis.';
+    }
     if (response.status === 401 && active && active === employeeAtRequest) {
       clearLocalSession();
       const status = await api('/api/session');
@@ -825,6 +831,11 @@ $('#runWizardVerificationBtn')?.addEventListener('click', () => active && runBus
     result = await api('/api/verification/run', {method: 'POST',body: JSON.stringify({ employeeId: active.id, message, stageToken, hllk: targets.map(item => item.hllk) })});
   } catch (error) {
     if (!active) throw error;
+    if (error.status === 429) {
+      $('#wizardVerificationCount').textContent = 'Verifikasi belum dikirim karena batas permintaan.';
+      $('#wizardVerificationPreview').textContent = error.recovery;
+      throw error;
+    }
     error.recovery = 'Pindai ulang untuk memeriksa status LLK sebelum mencoba lagi. Tidak ada pengiriman ulang otomatis.';
     $('#wizardVerificationCount').textContent = 'Hasil verifikasi belum dapat dipastikan. Pindai ulang sebelum mencoba lagi.';
     $('#wizardVerificationPreview').innerHTML = `<p class="result-uncertain">Hasil belum diterima. ${error.recovery}</p>${verificationList(targets.map(target => ({ ...target, error: error.message })), 'result')}`;
@@ -875,7 +886,7 @@ function failOnboarding(error) {
   renderOnboarding();
   $('#onboardingStatus').textContent = `Pemeriksaan berhenti: ${error.message}`;
   log(`Login berhenti: ${error.message}`, 'Gagal');
-  feedback(`${error.message} Klik Coba lagi untuk melanjutkan pemeriksaan. Untuk login ulang, klik Akhiri sesi.`, true);
+  feedback(`${error.message} ${error.status === 429 ? recoveryMessage(error) : 'Klik Coba lagi untuk melanjutkan pemeriksaan. Untuk login ulang, klik Akhiri sesi.'}`, true);
 }
 
 async function fetchBootstrapProfile() {

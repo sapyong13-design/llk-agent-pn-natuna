@@ -193,11 +193,26 @@ async function workdays(start, end) {
   return days;
 }
 async function getEmployees(session) { assertSession(session); return session.employee ? [session.employee] : []; }
-async function findEmployee(session,id) { assertSession(session); if (!session.employee || session.employee.id !== id) throw new HttpError(401, 'Sesi pegawai tidak aktif. Login SSO diperlukan.'); return session.employee; }
+function findEmployee(session,id) { assertSession(session); if (!session.employee || session.employee.id !== id) throw new HttpError(401, 'Sesi pegawai tidak aktif. Login SSO diperlukan.'); return session.employee; }
 async function withLock(session,id,task) {
-  await findEmployee(session,id);
+  findEmployee(session,id);
   if (session.busy || session.locks.size) throw new HttpError(409, 'Operasi sesi sedang berjalan');
   session.locks.add(id); try { return await task(); } finally { session.locks.delete(id); }
+}
+async function runExpensive(session,ip,task) {
+  const {app} = session;
+  if (!app.publicOrigin) return task();
+  assertSession(session);
+  const now = Date.now(), {limits} = app;
+  if (session.expiring || session.expires <= now) throw new HttpError(401,'Sesi login berakhir.');
+  if (app.activeExpensiveOperations >= limits.maxExpensiveOperations) throw rateError(3000);
+  let budget = session.expensiveBudget;
+  if (budget?.expires > now && budget.count >= limits.expensiveSessionOperations) throw rateError(budget.expires - now);
+  consumeIpBudget(app,ip,'expensive',limits.expensiveIpOperations);
+  if (!budget || budget.expires <= now) budget = session.expensiveBudget = {expires:now + limits.expensiveWindowMs,count:0};
+  budget.count++;
+  app.activeExpensiveOperations++;
+  try { return await task(); } finally { app.activeExpensiveOperations--; }
 }
 async function employeeClient(session,id) { await findEmployee(session,id); if(!session.client)throw new HttpError(401,'Sesi HTTP tidak aktif. Login ulang.');return session.client; }
 function closeLoginFlow(session,id,flow = session.loginFlows.get(id)) {
@@ -310,9 +325,10 @@ function submissionResponseInfo(response) {
   }
   return info;
 }
-async function submitPreview(session, id, rawPreview, policy) {
+async function submitPreview(session, id, rawPreview, policy, ip) {
   const preview = await validatePreview(rawPreview); if (!['skip','abort'].includes(policy)) bad('duplicatePolicy harus skip atau abort');
   const employee=await findEmployee(session,id),client=await employeeClient(session,id),report={at:new Date().toISOString(),employee:{id:employee.id,name:employee.name},duplicatePolicy:policy,results:[]},path=reportFile(session.app,randomBytes(16).toString('hex'));
+  return runExpensive(session,ip,async()=>{
     const existingEntries=await scrapeEntries(session,client),existingDates=new Set(existingEntries.dates);
     const duplicateDates=preview.filter(day=>existingDates.has(day.date)).map(day=>day.date);
     if (duplicateDates.length && policy==='abort') {
@@ -400,6 +416,7 @@ async function submitPreview(session, id, rawPreview, policy) {
     report.failed = report.results.filter(item => item.failed).length;
     await saveJson(path, report);
     return report;
+  });
 }
 async function templateSnapshot(app){const templates=await readJson(templateFile(app));return templates.version&&templates.departments?templates:{version:1,updatedAt:null,departments:templates};}
 async function readPersonal(session,id){return session.personalTemplates.get(id)||null;}
@@ -470,18 +487,21 @@ async function completeBootstrap(session,tempId,flow) {
 
 
 const verificationListUrl=()=>`${LLK_BASE}/verifikasi?start_date=&end_date=&status=1&by=nip&q=`;
-async function runAutomaticVerification(session,id,input) {
+async function runAutomaticVerification(session,id,input,ip) {
   const message=clean(input.message),stage=session.stagedVerification.get(id);
   if(!message)bad('Pesan verifikasi wajib diisi');
   if(!stage||stage.expires<Date.now()||stage.token!==clean(input.stageToken))throw new HttpError(409,'Hasil pemindaian sudah kedaluwarsa. Pindai ulang sebelum verifikasi.');
   const selected=new Set(Array.isArray(input.hllk)?input.hllk.map(String):[]),targets=selected.size?stage.targets.filter(item=>selected.has(item.hllk)):stage.targets;
   if(!targets.length)bad('Tidak ada LLK berstatus Belum Diverifikasi');
+  const client=await employeeClient(session,id);
+  return runExpensive(session,ip,async()=>{
   clearTimeout(stage.timer);
   try {
-    const results=await verifyBatch(await employeeClient(session,id),targets,message,{progress:(stage,message,detail)=>progress(session,id,stage,message,detail)});
+    const results=await verifyBatch(client,targets,message,{progress:(stage,message,detail)=>progress(session,id,stage,message,detail)});
     await audit(session.app,'verification.auto',id,{message,targetIds:targets.map(item=>item.hllk),filter:stage.filter},{counts:{total:results.length,success:results.filter(item=>item.success).length},result:'completed'});
     return {total:results.length,success:results.filter(item=>item.success).length,failed:results.filter(item=>!item.success).length,results,filter:stage.filter};
   } finally { closeVerificationStage(session,id); }
+  });
 }
 
 async function applyPersonal(session,id,input){await findEmployee(session,id);const stage=session.stagedPersonal.get(id);if(!stage||stage.expires<Date.now()||input.stageToken!==stage.token||input.confirm!==id)throw new HttpError(409,'Stage token atau konfirmasi tidak cocok');if(session.expiring)throw new HttpError(401,'Sesi login berakhir.');session.personalTemplates.set(id,validatePersonal(stage.candidate,id));session.stagedPersonal.delete(id);await audit(session.app,'personal-template.apply',id,{employeeId:id,digest:stage.digest},{counts:{activities:stage.candidate.activities.length},result:'applied'});return personalResponse(session,await findEmployee(session,id));}
@@ -498,8 +518,8 @@ async function api(session,req,res,url) {
   }
   if(req.method==='GET'&&path==='/api/progress'){const id=safeId(url.searchParams.get('employeeId')),since=Math.max(0,Number(url.searchParams.get('since'))||0);await findEmployee(session,id);return json(res,200,progressState(session,id,since));}
   if(req.method==='GET'&&path==='/api/employees')return json(res,200,await getEmployees(session));
-  if(req.method==='POST'&&path==='/api/verification/run'){const input=await bodyJson(req),id=safeId(input.employeeId);return json(res,200,await withLock(session,id,()=>runAutomaticVerification(session,id,input)));}
-  if(req.method==='GET'&&path==='/api/verification/preview'){const id=safeId(url.searchParams.get('employeeId'));return json(res,200,await withLock(session,id,async()=>{const targets=await scanVerification(await employeeClient(session,id),{progress:(stage,message,detail)=>progress(session,id,stage,message,detail)}),stage=stageVerification(session,id,targets,{status:'1',by:'nip',url:verificationListUrl(),pagesScanned:targets.pagesScanned,rowsFound:targets.rowsFound});return {stageToken:stage.token,targets,total:targets.length,pagesScanned:targets.pagesScanned,rowsFound:targets.rowsFound,validCount:targets.validCount,invalidCount:targets.invalidCount,invalidTargets:targets.invalidTargets,filter:stage.filter};}));}
+  if(req.method==='POST'&&path==='/api/verification/run'){const input=await bodyJson(req),id=safeId(input.employeeId);return json(res,200,await withLock(session,id,()=>runAutomaticVerification(session,id,input,req.clientIp)));}
+  if(req.method==='GET'&&path==='/api/verification/preview'){const id=safeId(url.searchParams.get('employeeId'));return json(res,200,await withLock(session,id,()=>runExpensive(session,req.clientIp,async()=>{const targets=await scanVerification(await employeeClient(session,id),{progress:(stage,message,detail)=>progress(session,id,stage,message,detail)}),stage=stageVerification(session,id,targets,{status:'1',by:'nip',url:verificationListUrl(),pagesScanned:targets.pagesScanned,rowsFound:targets.rowsFound});return {stageToken:stage.token,targets,total:targets.length,pagesScanned:targets.pagesScanned,rowsFound:targets.rowsFound,validCount:targets.validCount,invalidCount:targets.invalidCount,invalidTargets:targets.invalidTargets,filter:stage.filter};})));}
   if(req.method==='POST'&&path==='/api/bootstrap/login'){
     const input=await bodyJson(req);
     if(typeof input.supervisorNip!=='string'||!/^\d{18}$/.test(input.supervisorNip))bad('NIP atasan wajib tepat 18 digit');
@@ -526,7 +546,7 @@ async function api(session,req,res,url) {
     if(flow.auth.state.stage!=='authenticated')throw new HttpError(409,'Selesaikan kode authenticator terlebih dahulu.');
     if(session.busy||session.locks.size)throw new HttpError(409,'Operasi sesi sedang berjalan');
     session.busy=true;
-    try{const result=await completeBootstrap(session,tempId,flow);rotateSession(session,res);return json(res,200,result);
+    try{const result=await runExpensive(session,req.clientIp,()=>completeBootstrap(session,tempId,flow));rotateSession(session,res);return json(res,200,result);
     }finally{session.busy=false;}
   }
   const employeeRoute = path.match(/^\/api\/employees\/([^/]+)\/(.+)$/);
@@ -537,14 +557,18 @@ async function api(session,req,res,url) {
   if(action==='personal-template'&&req.method==='GET')return json(res,200,await personalResponse(session,await findEmployee(session,id)));
   if (action === 'calendar-entries' && req.method === 'GET') return json(res, 200, await withLock(session,id, async () => {
     if (url.searchParams.get('refresh') !== '1' && session.calendarEntries.has(id)) return session.calendarEntries.get(id);
+    return runExpensive(session,req.clientIp,async()=>{
     session.calendarEntries.delete(id);
     const entries=await scrapeEntries(session,await employeeClient(session,id),id);
     return session.calendarEntries.get(id)||cacheCalendarEntries(session,id,entries);
+    });
   }));
   if (action === 'preview' && req.method === 'POST') {
     const input = await bodyJson(req);
     return json(res, 200, await withLock(session,id, async () => {
       const employee=await findEmployee(session,id),client=await employeeClient(session,id);
+        if(session.app.publicOrigin)validateRange(input.start,input.end);
+        return runExpensive(session,req.clientIp,async()=>{
         const source=input.source==='general'?'general':'page';
         progress(session,id,'preview-start',`Menyiapkan isian ${input.start} sampai ${input.end}…`);
         const entries=await readEntries(client,{scope:'latest'});
@@ -553,18 +577,19 @@ async function api(session,req,res,url) {
           : [];
         progress(session,id,'preview-llk-done', `Halaman terbaru LLK terbaca: ${entries.length} baris.`);
         return generatePreview(session.app, employee, input.start, input.end, source, input.department, pageActivities, entries);
+        });
     }));
   }
   if (action === 'personal-template/apply' && req.method === 'POST') { const input=await bodyJson(req); return json(res,200,await withLock(session,id,()=>applyPersonal(session,id,input))); }
   if (action === 'personal-template' && req.method === 'DELETE') { const input=await bodyJson(req); return json(res,200,await withLock(session,id,()=>resetPersonal(session,id,input))); }
-  if (action === 'personal-template/import' && req.method === 'POST') return json(res, 200, await withLock(session,id, () => importPersonal(session,id)));
-  if (action === 'session/status' && req.method === 'GET') return json(res,200,await withLock(session,id,async()=>{
+  if (action === 'personal-template/import' && req.method === 'POST') return json(res, 200, await withLock(session,id, () => runExpensive(session,req.clientIp,()=>importPersonal(session,id))));
+  if (action === 'session/status' && req.method === 'GET') return json(res,200,await withLock(session,id,()=>runExpensive(session,req.clientIp,async()=>{
     const profile=await readProfile(await employeeClient(session,id));
     return {authenticated:profile.nip===id,source:'http-session'};
-  }));
+  })));
   if (action === 'submit' && req.method === 'POST') {
     const input = await bodyJson(req);
-    const report = await withLock(session,id, () => submitPreview(session,id, input.preview, input.duplicatePolicy));
+    const report = await withLock(session,id, () => submitPreview(session,id, input.preview, input.duplicatePolicy, req.clientIp));
     await audit(session.app,'submit', id, input.preview, { counts: { submitted: report.success, failed: report.failed }, result: 'completed' });
     return json(res, 200, sanitize(report));
   }
@@ -572,7 +597,7 @@ async function api(session,req,res,url) {
 }
 
 const mime={'.html':'text/html; charset=utf-8','.css':'text/css; charset=utf-8','.js':'text/javascript; charset=utf-8','.json':'application/json'};
-const DEFAULT_PUBLIC_LIMITS = Object.freeze({maxSessions:200,newSessionsPerIp:20,ipAttempts:20,sessionAttempts:8,ipWindowMs:15*60_000,sessionWindowMs:5*60_000,maxIpBuckets:1024,bodyBytes:1_000_000});
+const DEFAULT_PUBLIC_LIMITS = Object.freeze({maxSessions:200,newSessionsPerIp:20,ipAttempts:20,sessionAttempts:8,ipWindowMs:15*60_000,sessionWindowMs:5*60_000,maxIpBuckets:1024,bodyBytes:1_000_000,maxExpensiveOperations:8,expensiveSessionOperations:20,expensiveIpOperations:200,expensiveWindowMs:10*60_000});
 const THEME_SCRIPT = "(function(){try{var t=localStorage.getItem('llk-theme');if(t!=='dark'&&t!=='light')t=window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light';document.documentElement.setAttribute('data-theme',t)}catch(e){}})();";
 const CSP = `default-src 'self'; script-src 'self' 'sha256-${createHash('sha256').update(THEME_SCRIPT).digest('base64')}'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'`;
 function hostingOrigin(value) {
@@ -595,19 +620,23 @@ function rateError(ms) {
   return error;
 }
 function pruneIpBudgets(app, now = Date.now()) {
-  for (const [ip, budget] of app.ipBudgets) if (budget.expires <= now) app.ipBudgets.delete(ip);
+  for (const [ip, budget] of app.ipBudgets) if (budget.expires <= now && budget.expensiveExpires <= now) app.ipBudgets.delete(ip);
 }
 function consumeIpBudget(app, ip, kind, limit) {
-  const now = Date.now();
+  const now = Date.now(), expensive = kind === 'expensive', expiresKey = expensive ? 'expensiveExpires' : 'expires', windowMs = expensive ? app.limits.expensiveWindowMs : app.limits.ipWindowMs;
   let budget = app.ipBudgets.get(ip);
-  if (budget?.expires <= now) { app.ipBudgets.delete(ip); budget = null; }
   if (!budget) {
     if (app.ipBudgets.size >= app.limits.maxIpBuckets) pruneIpBudgets(app, now);
-    if (app.ipBudgets.size >= app.limits.maxIpBuckets) throw rateError(app.limits.ipWindowMs);
-    budget = {expires:now + app.limits.ipWindowMs,sessions:0,attempts:0};
+    if (app.ipBudgets.size >= app.limits.maxIpBuckets) throw rateError(windowMs);
+    budget = {expires:0,sessions:0,attempts:0,expensiveExpires:0,expensive:0};
     app.ipBudgets.set(ip, budget);
   }
-  if (budget[kind] >= limit) throw rateError(budget.expires - now);
+  if (budget[expiresKey] <= now) {
+    budget[expiresKey] = now + windowMs;
+    if (expensive) budget.expensive = 0;
+    else { budget.sessions = 0; budget.attempts = 0; }
+  }
+  if (budget[kind] >= limit) throw rateError(budget[expiresKey] - now);
   budget[kind]++;
 }
 function consumeSessionAttempt(session) {
@@ -633,7 +662,7 @@ export async function createAppServer({authFactory=()=>new CasAuth(),clientFacto
   if (Object.keys(limits).some(key => !(key in DEFAULT_PUBLIC_LIMITS) || !Number.isSafeInteger(limits[key]) || limits[key] <= 0 || limits[key] > 2_147_483_647)) throw new TypeError('Konfigurasi batas publik tidak valid');
   if (proxy && !origin) throw new TypeError('Proxy wajib memakai LLK_PUBLIC_ORIGIN');
   // ponytail: sessions live in one process; passenger.cjs holds native flock; use shared state before scaling workers.
-  const app={authFactory,clientFactory,dataDir:resolve(dataDir),sessionTtlMs,publicOrigin:origin?.origin || '',limits,sessions:new Map(),ipBudgets:new Map(),stopping:false};
+  const app={authFactory,clientFactory,dataDir:resolve(dataDir),sessionTtlMs,publicOrigin:origin?.origin || '',limits,sessions:new Map(),ipBudgets:new Map(),activeExpensiveOperations:0,stopping:false};
   await mkdir(app.dataDir,{recursive:true,mode:0o700});
   if(process.platform!=='win32')await chmod(app.dataDir,0o700);
   const server = createServer((req, res) => {
@@ -697,7 +726,7 @@ export async function createAppServer({authFactory=()=>new CasAuth(),clientFacto
       else if (!res.writableEnded) res.end();
     });
   });
-  const budgetTimer = origin ? setInterval(() => pruneIpBudgets(app), Math.min(limits.ipWindowMs, 60_000)) : null;
+  const budgetTimer = origin ? setInterval(() => pruneIpBudgets(app), Math.min(limits.ipWindowMs, limits.expensiveWindowMs, 60_000)) : null;
   budgetTimer?.unref();
   server.on('close',()=>{app.stopping=true;clearInterval(budgetTimer);app.ipBudgets.clear();for(const session of app.sessions.values())expireSession(session);});
   return server;

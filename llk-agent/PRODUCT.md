@@ -34,6 +34,7 @@ Agent lokal atau hosting HTTPS dengan seluruh operasi LLK melalui HTTP dan cooki
 - Verifikasi LLK anggota & kirim dari dalam aplikasi; log & laporan lokal (JSON, bisa diekspor).
 - Profil, lookup atasan, riwayat, seluruh tanggal terisi, kirim LLK, dan verifikasi anggota menggunakan HTTP. CSRF dimuat baru sebelum kirim; hasil harus dibaca kembali. POST tidak dicoba ulang otomatis. Cookie SSO, template, cache, progres, token tahap, dan lock dipisahkan per sesi, termasuk sesi NIP sama; laporan tiap pengiriman mempunyai nama unik. Kedaluwarsa menunggu operasi yang sudah berjalan selesai sebelum client ditutup.
 - `ponytail:` state hanya memori satu proses Node.js. Hosting mengunci satu worker melalui LSAPI_CHILDREN=1 dan flock Linux privat; worker kedua ditolak. Restart meminta login ulang; scale multi-process memerlukan store bersama dan lock terdistribusi. HTTPS/Host/Origin/proxy secret ketat, cookie Secure, dan batas sesi/percobaan login publik aktif. Default lokal tetap loopback. Node.js 16 tidak didukung.
+- Operasi upstream publik maksimum 8 bersamaan, 20/sesi/10 menit, 200/IP/10 menit; cache kalender dan progres tidak dihitung. 429 sebelum upstream, Retry-After tanpa retry otomatis. DNS tetap IDwebhost, tidak ada gateway pegawai. Mitigasi DDoS volumetrik membutuhkan penyedia dan belum terverifikasi dari cPanel akun.
 
 ## Brand Commitments
 

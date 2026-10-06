@@ -54,9 +54,9 @@ printf '%s\n' "$RELEASE" > "$BACKUP/new-release"
 stop_workers() {
   cloudlinux-selector stop --json --interpreter nodejs --user pnnatuna --app-root private/llk/current
   local pid args
-  while read -r pid args; do
+  ps -u pnnatuna -o pid=,args= | while read -r pid args; do
     case "$args" in lsnode:/home/pnnatuna/private/llk/current/) kill -TERM "$pid";; esac
-  done < <(ps -u pnnatuna -o pid=,args=)
+  done
   # Native runtime lock stays held while in-flight requests drain.
   flock -w 15 "$BASE/runtime/runtime.lock" true
 }

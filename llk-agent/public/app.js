@@ -78,6 +78,7 @@ function syncControls() {
   if ($('#runWizardVerificationBtn')) $('#runWizardVerificationBtn').disabled = busy || !verificationTargets.length || !verificationStageToken;
   $('#refreshCalendarEntriesBtn').disabled = busy || !active || Boolean(calendarEntries?.loading);
   $('#selectUnfilledDaysBtn').disabled=busy||!active||!calendarEntries?.available||!calendarEntries.complete||calendarEntries.loading||Boolean(calendarEntries.error)||$('#selectUnfilledDaysBtn').dataset.empty==='true';
+  $('#previewBtn').disabled = busy || !active || !Number($('#previewBtn').dataset.workdays);
   $('#calendarPrevBtn').disabled = busy || calendarMonth.getMonth() === 0;
   $('#calendarNextBtn').disabled = busy || calendarMonth.getMonth() === 11;
   document.querySelectorAll('[data-calendar-date]').forEach(control => {
@@ -86,18 +87,29 @@ function syncControls() {
   });
   const onboardingLocked = busy || onboardingState !== 'idle';
   for (const selector of ['#quickSupervisorNip','#ssoUsername','#ssoPassword','#quickSatker','#quickSupervisorChoice']) $(selector).disabled = onboardingLocked;
+  $('#togglePasswordBtn').disabled = onboardingLocked;
   $('#ssoCode').disabled = busy || onboardingState !== 'authenticator';
   $('#quickSsoLoginBtn').disabled = busy || !['idle','authenticator'].includes(onboardingState);
   $('#quickSsoRetryBtn').disabled = busy || onboardingState !== 'error';
 }
 
 async function api(path, options = {}) {
+  const employeeAtRequest = active;
   const headers = options.body instanceof FormData ? options.headers : { 'content-type': 'application/json', ...(options.headers || {}) };
   const response = await fetch(path, { credentials: 'same-origin', ...options, headers });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
     const error = new Error(data.error || `Permintaan gagal (${response.status})`);
     error.status = response.status;
+    if (response.status === 401 && active && active === employeeAtRequest) {
+      clearLocalSession();
+      const status = await api('/api/session');
+      if (status.employee || status.pending) {
+        onboardingState = 'error';
+        renderOnboarding();
+      }
+      error.recovery = 'Sesi perlu diperbarui. Akhiri sesi jika masih aktif, lalu login SSO kembali; draf sebelumnya telah dibersihkan.';
+    }
     throw error;
   }
   return data;
@@ -121,6 +133,7 @@ async function pollOperationProgress(employeeId,signal){
     finalRead = signal.aborted;
     try{
       const state=await api(`/api/progress?employeeId=${encodeURIComponent(employeeId)}&since=${since}`);
+      if (active?.id !== employeeId) return;
       progressCursors.set(employeeId, Math.max(since, state.sequence || 0));
       // Drain final events after the operation returns, before stopping polling.
       for (const event of state.events || []) {
@@ -268,7 +281,7 @@ function selectEmployee(employee) {
   const examinerConfirmed = examiner.verified === true && ['llk-form', 'llk-select2', 'llk-api'].includes(examiner.source);
   $('#examinerName').textContent = examiner.name || 'Nama belum terbaca';
   $('#examinerNip').textContent = examiner.nip || examiner.id || '—';
-  $('#examinerStatus').textContent = examinerConfirmed ? 'Terkonfirmasi dari LLK' : 'Belum terkonfirmasi dari LLK';
+  $('#examinerStatus').textContent = examinerConfirmed ? 'Terkonfirmasi dari LLK' : 'Belum terkonfirmasi — periksa sebelum mengirim';
   $('#examinerStatus').classList.toggle('is-confirmed', examinerConfirmed);
 
 
@@ -516,9 +529,10 @@ function renderPersonalTemplate(info) {
 
 async function loadPersonalTemplate(employeeId) {
   if (!employeeId) return;
+  const employee = active;
   try {
     const info = await api(`/api/employees/${employeeId}/personal-template`);
-    if (active?.id === employeeId) renderPersonalTemplate(info);
+    if (active === employee && active?.id === employeeId) renderPersonalTemplate(info);
   }
   catch (error) { log(`Gagal memuat daftar halaman LLK: ${error.message}`); }
 }
@@ -632,10 +646,10 @@ function renderCalendar() {
   $('#calendarUnmarkedStatus').textContent = unmarkedStatus;
   const fetched = entries?.fetchedAt ? new Intl.DateTimeFormat('id-ID', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(entries.fetchedAt)) : '';
   $('#calendarEntriesStatus').textContent = [
-    entries?.loading ? 'Membaca seluruh halaman LLK…' : entries?.error || (entries?.available ? `${entries.dates.size} tanggal terisi ditemukan dari ${entries.pagesScanned} halaman.` : 'Belum diperiksa. Data isian LLK belum tersedia.'),
-    fetched ? `${entries?.available ? (entries.loading || entries.error ? 'Hasil pembacaan sebelumnya' : 'Hasil pembacaan') : 'Pemeriksaan terakhir'}: ${fetched}.` : '',
+    entries?.loading ? 'Membaca seluruh halaman LLK…' : entries?.error || (entries?.available && entries.complete ? `Diperbarui ${fetched} · seluruh halaman dipindai.` : 'Data isian belum tersedia. Tanggal kosong belum dapat dipastikan.'),
     entries?.warning || '',
   ].filter(Boolean).join(' ');
+  $('#calendarEntriesDetails').textContent = entries?.available ? `${entries.dates.size} tanggal terisi ditemukan dari ${entries.pagesScanned} halaman.${fetched ? ` Pembacaan${entries.loading || entries.error ? ' sebelumnya' : ''}: ${fetched}.` : ''}` : 'Belum ada hasil pembacaan lengkap.';
   $('#calendarEntriesStatus').classList.toggle('is-error', Boolean(entries?.error || (!entries?.loading && entries?.warning)));
   $('#refreshCalendarEntriesBtn').textContent = entries?.loading ? 'Memindai semua halaman…' : 'Perbarui isian LLK';
   $('#refreshCalendarEntriesBtn').disabled = busy || !active || Boolean(entries?.loading);
@@ -647,7 +661,7 @@ function renderCalendar() {
   }
   const complete=entries?.available&&entries.complete&&!entries.loading&&!entries.error;
   const filled=complete?eligible.filter(date=>entries.dates.has(date)).length:0;
-  $('#calendarMonthSummary').textContent=complete?`${filled} hari kerja terisi · ${eligible.length-filled} belum terisi (sampai hari ini)`:'Status bulan belum lengkap. Perbarui isian LLK sebelum memilih tanggal kosong.';
+  $('#calendarMonthSummary').textContent=complete?`${new Intl.DateTimeFormat('id-ID',{month:'long'}).format(calendarMonth)}: ${filled} hari kerja terisi · ${eligible.length-filled} belum terisi sampai hari ini`:'Status bulan belum lengkap. Tanggal kosong belum dapat dipastikan.';
   $('#selectUnfilledDaysBtn').disabled=busy||!complete||filled===eligible.length;
   $('#selectUnfilledDaysBtn').dataset.empty=String(filled===eligible.length);
   $('#calendarMonthTitle').textContent = new Intl.DateTimeFormat('id-ID',{month:'long',year:'numeric'}).format(calendarMonth);
@@ -667,17 +681,21 @@ function renderCalendar() {
     const date = new Date(year,month,day), iso = isoDate(date), weekday = date.getDay();
     const official = calendarDays.get(iso), weekend = weekday===0 || weekday===6;
     const disabled = busy || iso > today || weekend || Boolean(official);
-    const selected = unfilledDates?unfilledDates.has(iso):calendarSelection.start && iso>=calendarSelection.start && iso<=(calendarSelection.end||calendarSelection.start);
+    const selected = iso <= today && !weekend && !official && (unfilledDates ? unfilledDates.has(iso) : Boolean(calendarSelection.start && iso>=calendarSelection.start && iso<=(calendarSelection.end||calendarSelection.start)));
     const type = official?.type || (weekend ? 'weekend' : 'workday');
     const title = official?.label || (weekend ? (weekday===6?'Sabtu':'Minggu') : 'Hari kerja');
     const occupied = entries?.available && entries.dates.has(iso);
     const occupancy = occupied ? 'Terisi di LLK' : unmarkedStatus;
-    const label = `${formatIndonesianDate(iso)}, ${title}, ${occupancy}${selected ? ', dipilih' : ''}`;
-    cells.push(`<button type="button" class="calendar-day is-${type}${occupied?' is-occupied':''}${selected?' is-selected':''}${iso===calendarSelection.start?' is-start':''}${iso===calendarSelection.end?' is-end':''}" data-calendar-date="${iso}" ${disabled?'disabled':''} aria-label="${escapeHtml(label)}" title="${escapeHtml(label)}"><strong>${day}</strong>${official?`<small>${official.type==='collective'?'Cuti':'Libur'}</small>`:weekend?'<small>Libur</small>':''}${occupied?'<small class="calendar-entry-marker">Terisi</small>':''}</button>`);
+    const label = `${formatIndonesianDate(iso)}, ${title}, ${occupancy}${iso > today ? ', tanggal mendatang belum dapat dipilih' : ''}${selected ? ', dipilih' : ''}`;
+    cells.push(`<button type="button" class="calendar-day is-${type}${iso > today?' is-future':''}${occupied?' is-occupied':''}${selected?' is-selected':''}${selected && iso===calendarSelection.start?' is-start':''}${selected && iso===calendarSelection.end?' is-end':''}" data-calendar-date="${iso}" ${disabled?'disabled':''} aria-pressed="${selected}" aria-label="${escapeHtml(label)}" title="${escapeHtml(label)}"><strong>${day}</strong>${official?`<small>${official.type==='collective'?'Cuti':'Libur'}</small>`:weekend?'<small>Libur</small>':''}${occupied?'<small class="calendar-entry-marker">Terisi</small>':''}${selected?'<small class="calendar-selection-marker">Dipilih</small>':''}</button>`);
   }
   grid.innerHTML = cells.join('');
   const summary = $('#calendarSummary');
-  if (summary) summary.textContent = calendarSelection.start ? `${workdays} hari kerja dipilih · ${excluded} hari dilewati (nonkerja atau belum lewat). Periksa rincian pada pratinjau sebelum kirim.` : 'Pilih tanggal mulai, lalu tanggal selesai.';
+  const selectedWorkdays = unfilledDates ? unfilledDates.size : workdays;
+  $('#previewBtn').dataset.workdays = String(selectedWorkdays);
+  $('#previewBtn').textContent = selectedWorkdays ? `Pratinjau LLK · ${selectedWorkdays} hari` : 'Pratinjau LLK';
+  $('#previewBtn').disabled = busy || !active || !selectedWorkdays;
+  if (summary) summary.textContent = calendarSelection.start ? `${selectedWorkdays} hari kerja dipilih${unfilledDates ? ' · tanggal terisi tidak disertakan' : ` · ${excluded} hari dilewati (nonkerja atau belum lewat)`}. Periksa pratinjau sebelum kirim.` : 'Pilih tanggal mulai, lalu tanggal selesai.';
   $('#calendarPrevBtn').disabled = busy || year===2026 && month===0;
   $('#calendarNextBtn').disabled = busy || year===2026 && month===11;
 }
@@ -716,7 +734,6 @@ $('#selectUnfilledDaysBtn').addEventListener('click',()=>{
  if(!dates.length)return;
  currentPreview=null;currentReport=null;editDayState.clear();$('#confirmCheck').checked=false;
  updateCalendarSelection(dates[0],dates.at(-1));unfilledDates=new Set(dates);renderCalendar();
- $('#calendarSummary').textContent=`${dates.length} hari kerja belum terisi dipilih. Tanggal terisi tidak disertakan; periksa pratinjau sebelum kirim.`;
 });
 $('#calendarGrid')?.addEventListener('click', event => {
   const button = event.target.closest('[data-calendar-date]');
@@ -781,6 +798,7 @@ async function refreshWizardVerification() {
     $('#refreshWizardVerificationBtn').classList.toggle('btn-primary', !verificationTargets.length);
     $('#refreshWizardVerificationBtn').classList.toggle('btn-outline', Boolean(verificationTargets.length));
   } catch (error) {
+    if (!active) throw error;
     verificationTargets = []; verificationStageToken = null;
     $('#runWizardVerificationBtn').disabled = true;
     $('#runWizardVerificationBtn').hidden = true;
@@ -806,6 +824,7 @@ $('#runWizardVerificationBtn')?.addEventListener('click', () => active && runBus
   try {
     result = await api('/api/verification/run', {method: 'POST',body: JSON.stringify({ employeeId: active.id, message, stageToken, hllk: targets.map(item => item.hllk) })});
   } catch (error) {
+    if (!active) throw error;
     error.recovery = 'Pindai ulang untuk memeriksa status LLK sebelum mencoba lagi. Tidak ada pengiriman ulang otomatis.';
     $('#wizardVerificationCount').textContent = 'Hasil verifikasi belum dapat dipastikan. Pindai ulang sebelum mencoba lagi.';
     $('#wizardVerificationPreview').innerHTML = `<p class="result-uncertain">Hasil belum diterima. ${error.recovery}</p>${verificationList(targets.map(target => ({ ...target, error: error.message })), 'result')}`;
@@ -895,6 +914,16 @@ async function resumeSession() {
   if (onboardingState === 'authenticator') $('#ssoCode').focus();
 }
 
+function setPasswordVisible(visible) {
+  $('#ssoPassword').type = visible ? 'text' : 'password';
+  $('#togglePasswordBtn').setAttribute('aria-pressed', String(visible));
+  $('#togglePasswordBtn').textContent = visible ? 'Sembunyikan password' : 'Tampilkan password';
+}
+$('#togglePasswordBtn').addEventListener('click', () => {
+  if (!$('#togglePasswordBtn').disabled) setPasswordVisible($('#ssoPassword').type === 'password');
+});
+$('#employeeForm').addEventListener('reset', () => setPasswordVisible(false));
+
 function renderSupervisorInput(){
  const natuna=$('#quickSatker').value==='Pengadilan Negeri Natuna',choice=$('#quickSupervisorChoice').value;
  const manual=!natuna||choice==='manual';
@@ -929,6 +958,7 @@ $('#employeeForm').addEventListener('submit', event => {
         const username = $('#ssoUsername').value.trim();
         const password = $('#ssoPassword').value;
         $('#ssoPassword').value = '';
+        setPasswordVisible(false);
         result = await api('/api/bootstrap/login', {method:'POST',body:JSON.stringify({supervisorNip,username,password,satker:$('#quickSatker').value,department:'umum_keuangan'})});
       }
       bootstrapFlow = result.tempId;
@@ -950,6 +980,44 @@ $('#quickSsoRetryBtn').addEventListener('click', () => {
   if (!busy && onboardingState === 'error') loadApp();
 });
 
+function clearLocalSession() {
+  stopSessionPolling();
+  active = null;
+  calendarEntries = null;
+  bootstrapFlow = null;
+  currentPreview = null;
+  currentReport = null;
+  previewSource = null;
+  changingDates = false;
+  heldVerification = [];
+  personalStage = null;
+  verificationTargets = [];
+  verificationStageToken = null;
+  progressCursors.clear();
+  editDayState.clear();
+  updateCalendarSelection(null, null);
+  $('#employeeForm').reset();
+  $('#wizardVerificationMessage').value = '';
+  $('#wizardVerificationPreview').textContent = '';
+  $('#wizardVerificationCount').textContent = '';
+  $('#previewCards').textContent = '';
+  $('#reportResults').textContent = '';
+  $('#personalStageDiffBody').textContent = '';
+  $('#personalStageBox').hidden = true;
+  $('#personalStageConfirm').checked = false;
+  renderPersonalTemplate({});
+  $('#workspaceTitle').textContent = 'Belum ada sesi';
+  $('#profilePosition').textContent = 'Masuk dengan akun SSO untuk mulai';
+  $('#satkerSelect').textContent = '';
+  $('#satkerSelect').hidden = true;
+  onboardingState = 'idle';
+  renderOnboarding();
+  setWizardStep(2);
+  $('#logBox').textContent = '';
+  delete $('#logBox').dataset.touched;
+  $('#logLatest').textContent = '';
+}
+
 $('#endSessionBtn').addEventListener('click', () => {
   if (busy) return;
   if ((currentPreview && !currentReport || calendarSelection.start && active || $('#wizardVerificationMessage').value.trim())
@@ -963,31 +1031,8 @@ $('#endSessionBtn').addEventListener('click', () => {
       else throw error;
       return;
     }
-    active = null;
-    calendarEntries = null;
-    bootstrapFlow = null;
-    currentPreview = null;
-    currentReport = null;
-    personalStage = null;
-    verificationTargets = [];
-    verificationStageToken = null;
-    progressCursors.clear();
-    editDayState.clear();
-    updateCalendarSelection(null, null);
-    $('#employeeForm').reset();
-    $('#wizardVerificationMessage').value = '';
-    $('#previewCards').textContent = '';
-    $('#reportResults').textContent = '';
-    $('#personalStageDiffBody').textContent = '';
-    $('#personalStageBox').hidden = true;
-    $('#personalStageConfirm').checked = false;
-    renderPersonalTemplate({});
-    $('#workspaceTitle').textContent = 'Belum ada sesi';
-    $('#profilePosition').textContent = 'Masuk dengan akun SSO untuk mulai';
-    $('#satkerSelect').textContent = '';
-    $('#satkerSelect').hidden = true;
-    onboardingState = 'idle';
-    renderOnboarding();
+    clearLocalSession();
+    await resumeSession();
     feedback('Sesi diakhiri. Masukkan NIP atasan yang memeriksa LLK Anda untuk login kembali.');
   }, 'Akhiri sesi').then(() => { if (!active && onboardingState === 'idle') $('#quickSupervisorNip').focus(); });
 });

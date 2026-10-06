@@ -48,7 +48,10 @@
         </div>
         <div class="form-group">
           <label for="ssoPassword">Password SSO</label>
-          <input class="form-control" id="ssoPassword" name="password" type="password" autocomplete="current-password" maxlength="2000" aria-describedby="ssoPrivacyHelp" required disabled>
+          <div class="password-controls">
+            <input class="form-control" id="ssoPassword" name="password" type="password" autocomplete="current-password" maxlength="2000" aria-describedby="ssoPrivacyHelp" required disabled>
+            <button class="btn btn-outline" id="togglePasswordBtn" type="button" aria-controls="ssoPassword" aria-pressed="false">Tampilkan password</button>
+          </div>
         </div>
         <div class="form-group">
           <label for="quickSatker">Nama Satker</label>
@@ -62,27 +65,31 @@
           <select class="form-control" id="quickSupervisorChoice" aria-describedby="supervisorDirectoryHelp" disabled>
             <option value="">Pilih pemeriksa LLK</option>
             <optgroup label="Pimpinan dan hakim">
-              <option value="198006162008051001">Joko Ciptanto, S.H., M.H. · Ketua · 198006162008051001</option>
-              <option value="199208212017121004">Salihin Ardiansyah, S.H., M.H. · Hakim · 199208212017121004</option>
-              <option value="199712262022031005">Alfariz Maulana Reza, S.H., M.H. · Hakim · 199712262022031005</option>
-              <option value="199906042022031008">Geraldo Gracelo Mario Situmeang, S.H., M.H. · Hakim · 199906042022031008</option>
-              <option value="199702172022031003">Haditio, S.H. · Hakim · 199702172022031003</option>
-              <option value="199703182022031007">Swandi Hutabarat, S.H. · Hakim · 199703182022031007</option>
+              <option value="198006162008051001">Joko Ciptanto, S.H., M.H. · Ketua</option>
+              <option value="199208212017121004">Salihin Ardiansyah, S.H., M.H. · Hakim</option>
+              <option value="199712262022031005">Alfariz Maulana Reza, S.H., M.H. · Hakim</option>
+              <option value="199906042022031008">Geraldo Gracelo Mario Situmeang, S.H., M.H. · Hakim</option>
+              <option value="199702172022031003">Haditio, S.H. · Hakim</option>
+              <option value="199703182022031007">Swandi Hutabarat, S.H. · Hakim</option>
             </optgroup>
             <optgroup label="Kepaniteraan">
-              <option value="197809302011011005">Hadry B., S.H. · Panitera; Plt. Panmud Perdata/Perikanan · 197809302011011005</option>
-              <option value="199604232020121001">Jhivo Wilanda, S.H. · Plt. Panmud Hukum · 199604232020121001</option>
-              <option value="199811252022031008">Ari Putra Utama, A.Md. A.B. · Plt. Panmud Pidana · 199811252022031008</option>
+              <option value="197809302011011005">Hadry B., S.H. · Panitera; Plt. Panmud Perdata/Perikanan</option>
+              <option value="199604232020121001">Jhivo Wilanda, S.H. · Plt. Panmud Hukum</option>
+              <option value="199811252022031008">Ari Putra Utama, A.Md. A.B. · Plt. Panmud Pidana</option>
             </optgroup>
             <optgroup label="Kesekretariatan">
-              <option value="199608172019031002">Mario Tyson Nadapdap, S.E. · Sekretaris · 199608172019031002</option>
-              <option value="199312102020121001">Candra Firmansyah, S.I.Pust. · Kasubbag Kepegawaian/Ortala · 199312102020121001</option>
-              <option value="199808202025061008">Frans Alberto Siregar, S.T. · Plt. Kasubbag Umum/Keuangan · 199808202025061008</option>
-              <option value="199412162025061006">Muhammad Faris Akbar, A.Md. · Plt. Kasubbag PTIP · 199412162025061006</option>
+              <option value="199608172019031002">Mario Tyson Nadapdap, S.E. · Sekretaris</option>
+              <option value="199312102020121001">Candra Firmansyah, S.I.Pust. · Kasubbag Kepegawaian/Ortala</option>
+              <option value="199808202025061008">Frans Alberto Siregar, S.T. · Plt. Kasubbag Umum/Keuangan</option>
+              <option value="199412162025061006">Muhammad Faris Akbar, A.Md. · Plt. Kasubbag PTIP</option>
             </optgroup>
             <option value="manual">Masukkan NIP manual</option>
           </select>
-          <small class="field-help" id="supervisorDirectoryHelp">Sumber: <a href="https://pn-natuna.go.id/profil-pengadilan/profil-hakim" target="_blank" rel="noopener noreferrer">hakim</a>, <a href="https://pn-natuna.go.id/profil-pengadilan/profil-kepaniteraan" target="_blank" rel="noopener noreferrer">kepaniteraan</a>, <a href="https://pn-natuna.go.id/profil-pengadilan/profil-kesekretariatan" target="_blank" rel="noopener noreferrer">kesekretariatan</a> · dibaca 5 Oktober 2026. Pilih pemeriksa yang benar; jabatan tidak otomatis menetapkan atasan Anda.</small>
+          <small class="field-help" id="supervisorDirectoryHelp">Pilih pemeriksa LLK yang sesuai atasan Anda; jabatan tidak otomatis menetapkan atasan.</small>
+          <details class="compact-details">
+            <summary>Sumber daftar pemeriksa</summary>
+            <p class="field-help">Sumber: <a href="https://pn-natuna.go.id/profil-pengadilan/profil-hakim" target="_blank" rel="noopener noreferrer">hakim</a>, <a href="https://pn-natuna.go.id/profil-pengadilan/profil-kepaniteraan" target="_blank" rel="noopener noreferrer">kepaniteraan</a>, <a href="https://pn-natuna.go.id/profil-pengadilan/profil-kesekretariatan" target="_blank" rel="noopener noreferrer">kesekretariatan</a> · dibaca 5 Oktober 2026.</p>
+          </details>
         </div>
       <p id="selectedSupervisorNip" class="field-help" aria-live="polite"></p>
       <div id="manualSupervisorNip" hidden>
@@ -101,7 +108,11 @@
         <button class="btn btn-primary" id="quickSsoLoginBtn" type="submit" disabled>Login SSO</button>
         <button class="btn btn-outline" id="quickSsoRetryBtn" type="button" hidden>Coba lagi</button>
       </div>
-      <p class="field-help" id="ssoPrivacyHelp">Password dan kode dikirim melalui backend lokal ke SSO resmi, tidak disimpan atau dicatat. Sesi hanya dalam memori. Seluruh operasi LLK memakai HTTP tanpa Chromium.</p>
+      <p class="field-help" id="ssoPrivacyHelp">Backend aplikasi meneruskan password dan kode melalui HTTPS ke SSO resmi; keduanya tidak disimpan atau dicatat. Cookie SSO hanya di memori server aplikasi.</p>
+      <details class="compact-details">
+        <summary>Detail sesi dan runtime</summary>
+        <p class="field-help">Sesi dipisahkan per browser melalui cookie aplikasi; cookie SSO hanya di memori server. Login/MFA tertunda berakhir setelah 10 menit; sesi berakhir setelah 30 menit tanpa aktivitas atau saat LLK Agent berhenti. Tab dalam browser yang sama berbagi sesi. Gunakan profil browser berbeda untuk akun terpisah.</p>
+      </details>
     </form>
 
 
@@ -110,12 +121,15 @@
         <div class="examiner-identity">
           <h2 id="examinerLabel">Pemeriksa LLK Anda</h2>
           <strong id="examinerName">Nama belum terbaca</strong>
+          <span class="examiner-badge" id="examinerStatus">Belum terkonfirmasi dari LLK</span>
           <p class="examiner-nip">NIP <span id="examinerNip">—</span></p>
         </div>
-        <span class="examiner-badge" id="examinerStatus">Belum terkonfirmasi dari LLK</span>
-        <p class="examiner-help">Pastikan nama dan NIP sesuai atasan yang memeriksa LLK Anda sebelum mengirim. Jika tidak sesuai, akhiri sesi lalu login dengan NIP atasan yang benar.</p>
+        <details class="compact-details examiner-details">
+          <summary>Detail pemeriksa</summary>
+          <p class="examiner-help">Pastikan nama dan NIP sesuai atasan yang memeriksa LLK Anda sebelum mengirim. Jika tidak sesuai, akhiri sesi lalu login dengan NIP atasan yang benar.</p>
+        </details>
       </section>
-      <p class="field-help">Refresh mempertahankan sesi selama LLK Agent berjalan, tetapi draf isian dan pesan belum dikirim akan hilang.</p>
+      <p class="field-help refresh-warning">Refresh menjaga sesi browser yang masih aktif, tetapi menghapus draf isian dan pesan yang belum dikirim.</p>
             <div class="mode-switch" id="workChoices" role="radiogroup" aria-label="Pilih pekerjaan" hidden>
               <label class="mode-option"><input type="radio" name="workflowMode" value="create"> <span><strong>Buat LLK</strong></span></label>
               <label class="mode-option"><input type="radio" name="workflowMode" value="verify"> <span><strong>Verifikasi LLK Anggota</strong></span></label>
@@ -155,15 +169,15 @@
                     <strong id="calendarMonthTitle"></strong>
                     <button class="quiet-action calendar-nav" id="calendarNextBtn" type="button" aria-label="Bulan berikutnya">Berikutnya</button>
                   </header>
-                  <div class="calendar-entries-toolbar">
-                    <strong>Isian LLK · seluruh halaman</strong>
-                    <button class="btn btn-sm btn-outline" id="refreshCalendarEntriesBtn" type="button" aria-describedby="calendarEntriesStatus calendarEntriesScope">Perbarui isian LLK</button>
-                  </div>
                   <p class="calendar-entries-status" id="calendarEntriesStatus" role="status" aria-live="polite">Belum diperiksa.</p>
                   <p id="calendarMonthSummary" class="field-help" role="status">Status bulan belum lengkap.</p>
                   <button class="btn btn-outline" id="selectUnfilledDaysBtn" type="button" disabled>Pilih hari kerja belum terisi</button>
                   <div class="calendar-weekdays" aria-hidden="true"><span>Sen</span><span>Sel</span><span>Rab</span><span>Kam</span><span>Jum</span><span>Sab</span><span>Min</span></div>
                   <div class="calendar-grid" id="calendarGrid"></div>
+                  <div class="calendar-entries-toolbar">
+                    <strong>Isian LLK · seluruh halaman</strong>
+                    <button class="btn btn-sm btn-outline" id="refreshCalendarEntriesBtn" type="button" aria-describedby="calendarEntriesStatus calendarEntriesScope">Perbarui isian LLK</button>
+                  </div>
                   <div class="calendar-legend" aria-label="Keterangan kalender">
                     <span><i class="legend-national"></i>Libur nasional</span>
                     <span><i class="legend-collective"></i>Cuti bersama</span>
@@ -171,7 +185,11 @@
                     <span><i class="legend-selected"></i>Rentang dipilih</span>
                     <span><i class="legend-occupied" aria-hidden="true"></i>Terisi di LLK</span>
                   </div>
-                  <p class="calendar-entries-scope" id="calendarEntriesScope">Tanggal tanpa label Terisi: <strong id="calendarUnmarkedStatus">Belum diperiksa</strong>. Seluruh halaman dipindai. Jika pembacaan gagal, tanggal kosong belum dapat dipastikan. Status sesuai waktu pembacaan terakhir.</p>
+                  <details class="compact-details calendar-reading-details">
+                    <summary>Detail pembacaan</summary>
+                    <p class="field-help" id="calendarEntriesDetails">Belum diperiksa.</p>
+                    <p class="calendar-entries-scope" id="calendarEntriesScope">Tanggal tanpa label Terisi: <strong id="calendarUnmarkedStatus">Belum diperiksa</strong>. Seluruh halaman dipindai. Jika pembacaan gagal, tanggal kosong belum dapat dipastikan. Status sesuai waktu pembacaan terakhir.</p>
+                  </details>
                 </section>
                 <div class="date-summary">
                   <div class="range-fields" aria-live="polite">
@@ -239,7 +257,7 @@
             </div>
           </details>
               <div class="button-row">
-                <button class="btn btn-primary" id="previewBtn" type="button">Siapkan LLK</button>
+                <button class="btn btn-primary" id="previewBtn" type="button" aria-describedby="calendarSummary" disabled>Pratinjau LLK</button>
               </div>
                 </div>
               </div>

@@ -16,23 +16,24 @@ Otomasi pengisian dan pengiriman LLK harian: login SSO sekali per profil, pilih 
 
 ## Positioning
 
-Agent lokal dengan seluruh operasi LLK melalui HTTP dan cookie sesi dalam memori. Password dan kode authenticator diteruskan ke SSO resmi tanpa disimpan. Tidak ada browser otomatis pada runtime; laporan dan audit tinggal di folder lokal `data/`.
+Agent lokal atau hosting HTTPS dengan seluruh operasi LLK melalui HTTP dan cookie sesi dalam memori server aplikasi. Password dan kode authenticator diteruskan ke SSO resmi tanpa disimpan. Tidak ada browser otomatis pada runtime; laporan dan audit tinggal di folder data privat server.
 
 ## Operating Context
 
-- Node.js 20.19+, browser biasa untuk UI, dijalankan via `LLK Agent.cmd` → `http://127.0.0.1:4545`; tidak memerlukan Edge/Chromium pada runtime.
+- Node.js 20.19+, browser biasa untuk UI; lokal via `LLK Agent.cmd` pada `http://127.0.0.1:4545`, produksi `https://llk.pn-natuna.go.id` lewat CloudLinux/LiteSpeed Node.js 24.21.0 dan `passenger.cjs`. Runtime tidak memerlukan Edge/Chromium.
 - Pemakaian campuran siang–malam; desain harus nyaman di keduanya.
 - Istilah resmi yang dipakai pegawai: LLK, Satker, SSO, atasan langsung, NIP (18 digit).
 
 ## Capabilities and Constraints
 
 - Workflow boleh dirapikan; fitur dan aturan tetap (persetujuan pengguna 15 September 2026). Dua pilihan utama: Buat LLK dan Verifikasi LLK Anggota. Sesi SSO tersedia dari header; satu tahap kerja tampil. Buat LLK tetap melalui tanggal, pratinjau/edit, dan konfirmasi kirim. Verifikasi melalui daftar, pesan, tindakan, dan hasil. Istilah resmi tetap.
-- Pintu masuk: nama pengguna/password SSO dan NIP atasan langsung 18 digit; kode authenticator muncul jika CAS meminta MFA. Identitas dan kegiatan dibaca otomatis setelah sesi terbukti. Tidak ada pemilih akun tersimpan. Refresh meneruskan sesi runtime dan tahap MFA; Akhiri sesi menghapus identitas, cookie, dan draf sementara. Login tertunda berakhir setelah 10 menit.
+- Pintu masuk: nama pengguna/password SSO dan NIP atasan langsung 18 digit; kode authenticator muncul jika CAS meminta MFA. Identitas dan kegiatan dibaca otomatis setelah sesi terbukti. Cookie aplikasi acak mengikat state ke browser; tab satu profil browser berbagi sesi, profil browser berbeda terisolasi. Akhiri sesi hanya menghapus sesi pemiliknya; UI membersihkan draf dan log. Login/MFA tertunda berakhir setelah 10 menit; sesi kedaluwarsa setelah 30 menit tanpa aktivitas API.
 - Log aktivitas tetap terbuka, kronologis, dengan penyamaran token dan gulir mengikuti hanya saat pembaca berada di bawah. Daftar kegiatan berada dekat sumber isian.
 - Identitas pegawai, cookie, dan template pribadi baru hanya dalam memori proses. Data profil lama tidak dipakai dan tidak dihapus. Laporan pengiriman serta audit lokal tetap disimpan.
 - Sumber kegiatan: kegiatan unik dari halaman terakhir akun, atau template umum per bagian pengadilan.
 - Verifikasi LLK anggota & kirim dari dalam aplikasi; log & laporan lokal (JSON, bisa diekspor).
-- Profil, lookup atasan, riwayat, seluruh tanggal terisi, kirim LLK, dan verifikasi anggota menggunakan HTTP. CSRF dimuat baru sebelum kirim; hasil harus dibaca kembali. POST tidak dicoba ulang otomatis. Sesi berakhir ketika proses LLK Agent berhenti, bukan ketika tab ditutup.
+- Profil, lookup atasan, riwayat, seluruh tanggal terisi, kirim LLK, dan verifikasi anggota menggunakan HTTP. CSRF dimuat baru sebelum kirim; hasil harus dibaca kembali. POST tidak dicoba ulang otomatis. Cookie SSO, template, cache, progres, token tahap, dan lock dipisahkan per sesi, termasuk sesi NIP sama; laporan tiap pengiriman mempunyai nama unik. Kedaluwarsa menunggu operasi yang sudah berjalan selesai sebelum client ditutup.
+- `ponytail:` state hanya memori satu proses Node.js. Hosting mengunci satu worker melalui LSAPI_CHILDREN=1 dan flock Linux privat; worker kedua ditolak. Restart meminta login ulang; scale multi-process memerlukan store bersama dan lock terdistribusi. HTTPS/Host/Origin/proxy secret ketat, cookie Secure, dan batas sesi/percobaan login publik aktif. Default lokal tetap loopback. Node.js 16 tidak didukung.
 
 ## Brand Commitments
 

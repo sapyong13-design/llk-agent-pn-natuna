@@ -87,7 +87,7 @@ done
 cp "$RELEASE/RELEASE" "$APP/RELEASE"
 cloudlinux-selector start --json --interpreter nodejs --user pnnatuna --app-root private/llk/current
 # Retry read-only startup probe; never retry LLK mutations.
-SESSION=$(curl --fail --silent --show-error --retry 5 --retry-delay 2 --retry-all-errors --max-time 30 https://llk.pn-natuna.go.id/api/session)
+SESSION=$(curl --fail --silent --show-error --retry 5 --retry-delay 2 --max-time 30 https://llk.pn-natuna.go.id/api/session)
 node -e 'const state=JSON.parse(process.argv[1]);if(state.employee!==null||state.pending!==null)process.exit(1)' "$SESSION"
 trap - ERR
 echo "Deployed $SHA; backup $BACKUP. Active users must login again."

@@ -16,23 +16,23 @@ Otomasi pengisian dan pengiriman LLK harian: login SSO sekali per profil, pilih 
 
 ## Positioning
 
-Agent lokal yang memakai sesi browser asli pegawai (profil Edge terpisah per pegawai): membaca dan mengisi LLK resmi atas nama pengguna. Semua data — cookie SSO, profil, log — tinggal di folder lokal `data/`; tidak ada server eksternal selain situs LLK resmi.
+Agent lokal dengan seluruh operasi LLK melalui HTTP dan cookie sesi dalam memori. Password dan kode authenticator diteruskan ke SSO resmi tanpa disimpan. Tidak ada browser otomatis pada runtime; laporan dan audit tinggal di folder lokal `data/`.
 
 ## Operating Context
 
-- Windows + Microsoft Edge + Node.js 20+, dijalankan via `LLK Agent.cmd` → `http://127.0.0.1:4545`.
+- Node.js 20.19+, browser biasa untuk UI, dijalankan via `LLK Agent.cmd` → `http://127.0.0.1:4545`; tidak memerlukan Edge/Chromium pada runtime.
 - Pemakaian campuran siang–malam; desain harus nyaman di keduanya.
 - Istilah resmi yang dipakai pegawai: LLK, Satker, SSO, atasan langsung, NIP (18 digit).
 
 ## Capabilities and Constraints
 
 - Workflow boleh dirapikan; fitur dan aturan tetap (persetujuan pengguna 15 September 2026). Dua pilihan utama: Buat LLK dan Verifikasi LLK Anggota. Sesi SSO tersedia dari header; satu tahap kerja tampil. Buat LLK tetap melalui tanggal, pratinjau/edit, dan konfirmasi kirim. Verifikasi melalui daftar, pesan, tindakan, dan hasil. Istilah resmi tetap.
-- Pintu masuk: NIP atasan langsung 18 digit, Login SSO, lalu identitas dan kegiatan dibaca otomatis. Tidak ada pemilih akun tersimpan. Refresh meneruskan sesi runtime; Akhiri sesi menghapus identitas, cookie, dan draf sementara.
+- Pintu masuk: nama pengguna/password SSO dan NIP atasan langsung 18 digit; kode authenticator muncul jika CAS meminta MFA. Identitas dan kegiatan dibaca otomatis setelah sesi terbukti. Tidak ada pemilih akun tersimpan. Refresh meneruskan sesi runtime dan tahap MFA; Akhiri sesi menghapus identitas, cookie, dan draf sementara. Login tertunda berakhir setelah 10 menit.
 - Log aktivitas tetap terbuka, kronologis, dengan penyamaran token dan gulir mengikuti hanya saat pembaca berada di bawah. Daftar kegiatan berada dekat sumber isian.
 - Identitas pegawai, cookie, dan template pribadi baru hanya dalam memori proses. Data profil lama tidak dipakai dan tidak dihapus. Laporan pengiriman serta audit lokal tetap disimpan.
 - Sumber kegiatan: kegiatan unik dari halaman terakhir akun, atau template umum per bagian pengadilan.
 - Verifikasi LLK anggota & kirim dari dalam aplikasi; log & laporan lokal (JSON, bisa diekspor).
-- Otomasi menggunakan browser Chromium yang tersedia; sesi berakhir ketika proses LLK Agent berhenti, bukan ketika tab aplikasi ditutup.
+- Profil, lookup atasan, riwayat, seluruh tanggal terisi, kirim LLK, dan verifikasi anggota menggunakan HTTP. CSRF dimuat baru sebelum kirim; hasil harus dibaca kembali. POST tidak dicoba ulang otomatis. Sesi berakhir ketika proses LLK Agent berhenti, bukan ketika tab ditutup.
 
 ## Brand Commitments
 

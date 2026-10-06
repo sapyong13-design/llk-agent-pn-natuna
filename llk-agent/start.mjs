@@ -4,7 +4,7 @@ import { join } from 'node:path';
 
 const root = import.meta.dirname;
 const port = process.env.PORT || '4545';
-const dependency = join(root, 'node_modules', 'playwright-core', 'package.json');
+const dependency = join(root, 'node_modules', 'cheerio', 'package.json');
 
 function run(command, args) {
   return new Promise((resolve, reject) => {

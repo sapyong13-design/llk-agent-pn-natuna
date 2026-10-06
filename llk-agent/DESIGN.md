@@ -12,13 +12,13 @@ Arah dipilih pengguna: modern netral. Mode antarmuka: Operate. Identitas dokumen
 
 ## Susunan
 
-Header ringkas: nama aplikasi, identitas akun, status sesi, Akhiri sesi, tema. Pada seluler identitas mendapat satu baris penuh. Onboarding memakai judul Mulai sesi LLK, satu kolom NIP atasan, status nyata, serta satu tombol utama.
+Header ringkas: nama aplikasi, identitas akun, status sesi, Akhiri sesi, tema. Pada seluler identitas mendapat satu baris penuh. Onboarding memakai judul Mulai sesi LLK, kolom nama pengguna/password SSO dan NIP atasan, status nyata, serta satu tombol utama. Saat CAS meminta MFA, form kredensial diganti kolom kode authenticator dengan petunjuk kode terbaru. Input kode memakai autocomplete one-time-code; password/kode dibersihkan setelah dikirim. Kode salah tetap pada tahap MFA; sesi kedaluwarsa meminta login ulang. Sistem visual tetap modern netral.
 
 Dua pilihan workflow berupa tab bergaris bawah. Radio native tetap menjaga interaksi keyboard; fokus terlihat.
 
 Buat LLK memiliki tahap Tanggal, Periksa & kirim, Hasil. Kalender kiri dan pengaturan kanan; kalender diringkas setelah pratinjau. Ubah tanggal mempertahankan edit sampai rentang benar-benar berubah. Tombol kirim menyebut jumlah hari dan alasan jika belum dapat digunakan. Seluler mengikuti urutan baca vertikal.
 
-Identitas pemeriksa mendapat panel tersendiri: nama tebal, NIP terpisah, status konfirmasi dari LLK, serta petunjuk memeriksa kecocokan. Kalender menandai tanggal yang terlihat di halaman pertama dengan Terisi. Tanggal tanpa penanda bukan bukti kosong; cakupan halaman 1, waktu pembacaan, dan Perbarui isian LLK selalu dijelaskan. Data gagal dibaca tidak dianggap kosong.
+Identitas pemeriksa mendapat panel tersendiri: nama tebal, NIP terpisah, status konfirmasi dari LLK, serta petunjuk memeriksa kecocokan. Kalender menandai tanggal terisi dari seluruh halaman dengan Terisi. Jumlah halaman, waktu pembacaan, dan Perbarui isian LLK dijelaskan. Tanggal tanpa penanda dianggap belum terisi hanya sesudah pemindaian lengkap; loading atau pembacaan gagal tidak dianggap kosong. Riwayat kegiatan tetap bersumber dari halaman terakhir.
 
 Verifikasi dikelompokkan per pegawai dengan tanggal dan rincian. Siap dan ditahan terpisah. Hasil membedakan berhasil, gagal terbukti, dan belum pasti; belum pasti memakai warna amber serta instruksi pindai ulang, tanpa pengiriman ulang otomatis. Pesan wajib berada dekat tindakan.
 

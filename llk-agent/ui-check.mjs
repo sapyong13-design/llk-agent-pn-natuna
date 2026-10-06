@@ -11,7 +11,7 @@ try {
   await page.route('**/api/session', route => route.fulfill({ contentType: 'application/json', body: JSON.stringify({ employee: sessionEmployee, pending: null }) }));
   await page.route('**/api/session/end', route => { sessionEmployee = null; return route.fulfill({ contentType: 'application/json', body: '{}' }); });
   await page.route('**/api/employees/session-check/personal-template', route => route.fulfill({ contentType: 'application/json', body: JSON.stringify({ activities: [], personal: null }) }));
-  await page.route('**/api/employees/session-check/calendar-entries*', route => route.fulfill({ json: { dates: ['2026-09-14'], scope: 'page-1', available: true, fetchedAt: '2026-09-18T06:00:00Z' } }));
+  await page.route('**/api/employees/session-check/calendar-entries*', route => route.fulfill({ json: { dates: ['2026-09-14'], scope: 'all-pages', complete:true, pagesScanned:2, available: true, fetchedAt: '2026-09-18T06:00:00Z' } }));
   await page.route('**/api/verification/preview?*', route => { scans++; return route.fulfill({ contentType: 'application/json', body: JSON.stringify({ stageToken: 'local-test', targets: [{hllk:'test',date:'2026-09-01',valid:true}] }) }); });
   await page.goto('http://127.0.0.1:4545/');
   await page.waitForFunction(() => document.querySelector('#calendarGrid button'));

@@ -2,8 +2,10 @@ import { createServer } from 'node:http';
 import { readFile, writeFile, rename, mkdir, appendFile, chmod } from 'node:fs/promises';
 import { join, resolve, extname, relative, isAbsolute } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
-import { chromium } from 'playwright-core';
-import { browserLaunchOptions } from './browser.mjs';
+import { LlkHttp } from './llk-http.mjs';
+import { readProfile, resolveSupervisor, openCreate, readEntries } from './llk-read.mjs';
+import { scanVerification, verifyBatch } from './llk-verification.mjs';
+import { CasAuth } from './cas-auth.mjs';
 
 const ROOT = resolve(import.meta.dirname);
 const PUBLIC = join(ROOT, 'public');
@@ -18,18 +20,17 @@ const locks = new Set();
 const stagedPersonal = new Map();
 const personalTemplates = new Map();
 const calendarEntries = new Map();
-const sessionBrowsers = new Set();
+let sessionClient = null;
 let sessionEmployee = null;
 let sessionBusy = false;
 const operationProgress=new Map();
 function progress(id,stage,message,detail={}){const current=operationProgress.get(id)||{sequence:0,events:[]};const event={sequence:++current.sequence,at:new Date().toISOString(),stage,message,...sanitize(detail)};current.events.push(event);if(current.events.length>100)current.events.shift();current.active=!['complete','error'].includes(stage);current.latest=event;operationProgress.set(id,current);return event;}
 function progressState(id,since=0){const current=operationProgress.get(id)||{sequence:0,events:[],active:false,latest:null};return {active:current.active,sequence:current.sequence,latest:current.latest,events:current.events.filter(event=>event.sequence>since)};}
 const loginFlows = new Map();
-const sessionCookies = new Map();
 const stagedVerification = new Map();
 const VERIFICATION_STAGE_TTL = 10 * 60_000;
-function closeVerificationStage(id){const stage=stagedVerification.get(id);if(!stage)return;clearTimeout(stage.timer);stagedVerification.delete(id);stage.context?.close().catch(()=>{});}
-function stageVerification(id,context,targets,filter){closeVerificationStage(id);const token=randomBytes(16).toString('hex'),stage={token,context,targets,filter,expires:Date.now()+VERIFICATION_STAGE_TTL};stage.timer=setTimeout(()=>closeVerificationStage(id),VERIFICATION_STAGE_TTL);stagedVerification.set(id,stage);return stage;}
+function closeVerificationStage(id){const stage=stagedVerification.get(id);if(!stage)return;clearTimeout(stage.timer);stagedVerification.delete(id);}
+function stageVerification(id,targets,filter){closeVerificationStage(id);const token=randomBytes(16).toString('hex'),stage={token,targets,filter,expires:Date.now()+VERIFICATION_STAGE_TTL};stage.timer=setTimeout(()=>closeVerificationStage(id),VERIFICATION_STAGE_TTL);stage.timer.unref();stagedVerification.set(id,stage);return stage;}
 // Kalender libur SKB 3 Menteri 2026 (17 libur nasional + 8 cuti bersama).
 const SKB_2026_DAYS = [
   {date:'2026-01-01',type:'national',label:'Tahun Baru 2026 Masehi'},
@@ -106,64 +107,29 @@ async function workdays(start, end) {
   }
   return days;
 }
-function normalizeOfficialDate(value) {
-  const text = clean(value).toLowerCase();
-  const months = { januari:1, februari:2, maret:3, april:4, mei:5, juni:6, juli:7, agustus:8, september:9, oktober:10, november:11, desember:12 };
-  let match = text.match(/^(\d{1,2})[-/]([0-1]?\d)[-/](\d{4})$/);
-  if (match) return `${match[3]}-${match[2].padStart(2, '0')}-${match[1].padStart(2, '0')}`;
-  match = text.match(/^(\d{1,2})\s+([a-z]+)\s+(\d{4})$/);
-  return match && months[match[2]] ? `${match[3]}-${String(months[match[2]]).padStart(2, '0')}-${match[1].padStart(2, '0')}` : null;
-}
 async function getEmployees() { return sessionEmployee ? [sessionEmployee] : []; }
 async function findEmployee(id) { if (!sessionEmployee || sessionEmployee.id !== id) throw new HttpError(401, 'Sesi pegawai tidak aktif. Login SSO diperlukan.'); return sessionEmployee; }
 async function withLock(id, task) {
   if (sessionBusy || locks.size) throw new HttpError(409, 'Operasi sesi sedang berjalan');
   locks.add(id); try { await findEmployee(id); return await task(); } finally { locks.delete(id); }
 }
-function storeSessionCookies(id, cookies) { sessionCookies.set(id, cookies); }
-async function launchSessionContext(headless) {
-  const browser = await chromium.launch({ ...browserLaunchOptions(), headless });
-  sessionBrowsers.add(browser);
-  browser.on('disconnected', () => sessionBrowsers.delete(browser));
-  try {
-    const context = await browser.newContext({ viewport: headless ? { width: 1365, height: 768 } : null });
-    context.on('close', () => browser.close().catch(() => {}));
-    return context;
-  } catch (error) { await browser.close().catch(() => {}); throw error; }
-}
-async function launchEmployee(id, headless = true) {
-  const employee = await findEmployee(id), context = await launchSessionContext(headless);
-  try {
-    const cookies = sessionCookies.get(id);
-    if (cookies?.length) await context.addCookies(cookies);
-    return { employee, context };
-  } catch (error) { await context.close().catch(() => {}); throw error; }
-}
+async function employeeClient(id) { await findEmployee(id); if(!sessionClient)throw new HttpError(401,'Sesi HTTP tidak aktif. Login ulang.');return sessionClient; }
 async function closeLoginFlow(id, flow = loginFlows.get(id)) {
   if (!flow || flow.closing) return false;
   flow.closing = true; clearTimeout(flow.timer); loginFlows.delete(id);
-  try { await flow.context.close(); } catch {}
+  flow.auth?.close();
+  flow.client?.close();
   return true;
-}
-async function minimizeLoginWindow(context) {
-  const page = context.pages()[0];
-  if (!page) return;
-  const session = await context.newCDPSession(page);
-  try {
-    const { windowId } = await session.send('Browser.getWindowForTarget');
-    await session.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'minimized' } });
-  } finally { await session.detach(); }
 }
 function currentSession() {
   const pending = [...loginFlows.entries()].find(([, flow]) => !flow.completed && !flow.closing && !flow.closed);
-  return { employee: sessionEmployee, pending: pending ? { tempId: pending[0], authenticated: Boolean(authenticatedLlkPage(pending[1].context)) } : null };
+  return { employee: sessionEmployee, pending: pending ? { tempId: pending[0], stage: pending[1].auth.state.stage, authenticated: pending[1].auth.state.stage === 'authenticated' } : null };
 }
 async function clearSession() {
   for (const id of stagedVerification.keys()) closeVerificationStage(id);
   await Promise.all([...loginFlows].map(([id, flow]) => closeLoginFlow(id, flow)));
-  await Promise.all([...sessionBrowsers].map(browser => browser.close().catch(() => {})));
+  sessionClient?.close();sessionClient=null;
   sessionEmployee = null;
-  sessionCookies.clear();
   personalTemplates.clear();
   calendarEntries.clear();
   stagedPersonal.clear();
@@ -248,125 +214,18 @@ async function validatePreview(preview) {
     return { date: iso, items };
   });
 }
-function pageDiagnostic(page){try{const url=new URL(page.url());return {origin:url.origin,pathname:url.pathname,title:''};}catch{return {origin:'null',pathname:'',title:''};}}
-async function pageDiagnostics(context){return Promise.all(context.pages().map(async page=>({...pageDiagnostic(page),title:clean(await page.title().catch(()=>''))})));}
-function llkLocation(value){try{const url=value instanceof URL?value:new URL(value);return {url,sameOrigin:url.origin===LLK_BASE,authenticated:url.origin===LLK_BASE&&!/^\/(?:sso|login)(?:\/|$)/i.test(url.pathname)};}catch{return {url:null,sameOrigin:false,authenticated:false};}}
-function verificationErrorMessage(error){const message=clean(error?.message||error);return /Target page, context or browser has been closed|browserContext\.(?:cookies|newPage)/i.test(message)?'Sesi verifikasi berakhir. Pindai ulang; jika berulang, buka SSO dan login ulang.':message;}
-function authenticatedLlkPage(context){return context.pages().find(page=>llkLocation(page.url()).authenticated);}
-async function requireAuthenticatedLlkPage(context){const page=authenticatedLlkPage(context);if(page)return page;const pages=await pageDiagnostics(context);throw new HttpError(401,`Login LLK belum terdeteksi. Halaman aktif: ${pages.map(({origin,pathname})=>`${origin}${pathname}`).join(', ')||'(tidak ada)'}`);}
-async function discoverLlkRoutes(page){return page.evaluate(base=>{const normalize=value=>String(value||'').replace(/\s+/g,' ').trim().toLowerCase();const routes=[];for(const element of document.querySelectorAll('a[href],form[action]')){try{const url=new URL(element.getAttribute('href')||element.getAttribute('action'),location.href);if(url.origin!==base)continue;routes.push({url:url.href,label:normalize(`${element.textContent||''} ${element.getAttribute('title')||''} ${element.getAttribute('aria-label')||''} ${url.pathname}`)});}catch{}}return routes;},LLK_BASE);}
-function discoveredRoute(routes,patterns){return routes.find(route=>patterns.some(pattern=>pattern.test(route.label)))?.url||null;}
-async function navigateFeature(page,url){
-  if(!url)return {available:false,reason:'route-missing'};
-  try { await page.goto(url,{waitUntil:'domcontentloaded'}); }
-  catch(error) {
-    if(!/ERR_ABORTED|Navigation interrupted/i.test(error?.message||''))throw error;
-    await page.waitForLoadState('domcontentloaded').catch(()=>{});
-  }
-  const location=llkLocation(page.url());
-  if(!location.sameOrigin||!location.authenticated)throw new HttpError(401,'Sesi LLK kedaluwarsa; login ulang diperlukan');
-  const target=new URL(url);
-  return location.url.pathname===target.pathname||location.url.href===target.href?{available:true}:{available:false,reason:'llk-redirect'};
-}
-
 function cacheCalendarEntries(id, entries) {
-  const snapshot = { dates: [...new Set(entries.map(entry => entry.date).filter(date => /^\d{4}-\d{2}-\d{2}$/.test(date)))].sort(), scope: 'page-1', available: entries.available !== false, fetchedAt: new Date().toISOString() };
-  if (!snapshot.available) snapshot.warning = 'Daftar LLK halaman 1 belum dapat dibaca. Tanggal yang tidak terlihat bukan berarti kosong.';
-  if (id) calendarEntries.set(id, snapshot);
-  return snapshot;
+  const snapshot = { dates: entries.dates || [...new Set(entries.map(entry => entry.date).filter(Boolean))].sort(), scope:'all-pages', available:entries.available === true, complete:entries.complete === true, pagesScanned:entries.pagesScanned, fetchedAt:new Date().toISOString() };
+  if(!snapshot.available||!snapshot.complete)throw new HttpError(502,'Pemindaian seluruh LLK belum lengkap. Tanggal kosong belum dapat dipastikan.');
+  if(id)calendarEntries.set(id,snapshot);return snapshot;
 }
-async function scrapeEntries(context, existingPage, id = sessionEmployee?.id) {
-  const page = existingPage || await context.newPage(), owned = !existingPage;
-  try {
-    if (!llkLocation(page.url()).authenticated) {
-      await page.goto(LLK_BASE, { waitUntil: 'domcontentloaded' });
-      if (!llkLocation(page.url()).authenticated) throw new HttpError(401, 'Sesi LLK kedaluwarsa; login ulang diperlukan');
-    }
-    const llkMenu = page.locator('a[href="/llk"], a[href="https://llk.mahkamahagung.go.id/llk"]').first();
-    if (!await llkMenu.count()) {
-      const empty = [];
-      empty.available = false;
-      empty.warning = 'Menu LLK tidak ditemukan pada halaman akun aktif.';
-      cacheCalendarEntries(id, empty);
-      return empty;
-    }
-    await Promise.all([
-      page.waitForURL(url => url.origin === LLK_BASE && /^\/llk(?:\/|$)/.test(url.pathname), { waitUntil: 'domcontentloaded', timeout: 60000 }),
-      llkMenu.evaluate(link => link.click())
-    ]);
-    if (!/^\/llk(?:\/|$)/i.test(new URL(page.url()).pathname)) {
-      const empty = [];
-      empty.available = false;
-      empty.warning = `Menu LLK tidak membuka daftar kegiatan: ${page.url()}.`;
-      cacheCalendarEntries(id, empty);
-      return empty;
-    }
-    await page.locator('table').first().waitFor({ state: 'visible', timeout: 15000 }).catch(() => {});
-    const sourceUrl = page.url();
-    const entries = await page.evaluate(() => {
-      const cleanText = value => String(value || '').replace(/\s+/g, ' ').trim();
-      const tables = [...document.querySelectorAll('table')];
-      const output = [];
-      let recognized = false;
-      for (const table of tables) {
-        const headerRow = [...table.rows].find(row => [...row.cells].some(cell => /^(?:jam|waktu|kegiatan|uraian|aktivitas|jenis|hasil(?:\/volume)?|output)$/i.test(cleanText(cell.textContent))));
-        if (!headerRow) continue;
-        const headers = [...headerRow.cells].map(cell => cleanText(cell.textContent).toLowerCase());
-        const indexFor = pattern => headers.findIndex(header => pattern.test(header));
-        const timeIndex = indexFor(/^jam$|^waktu$/), activityIndex = indexFor(/^kegiatan$|^uraian$|^aktivitas$/), typeIndex = indexFor(/^jenis$/), resultIndex = indexFor(/^hasil(?:\/volume)?$|^output$/);
-        if (timeIndex < 0 || activityIndex < 0 || typeIndex < 0 || resultIndex < 0) continue;
-        recognized = true;
-        for (const row of [...table.rows].slice(headerRow.rowIndex + 1)) {
-          if (row.querySelector('table')) continue;
-          const cells = [...row.cells].map(cell => cleanText(cell.textContent));
-          const times = (cells[timeIndex] || '').match(/\b(?:[01]\d|2[0-3]):[0-5]\d\b/g) || [];
-          if (times.length < 2) continue;
-          const description = cleanText(cells[activityIndex]);
-          if (!description) continue;
-          const rowText = cleanText(cells.join(' '));
-          const rawDate = (cleanText(table.parentElement?.textContent).match(/Tanggal Kegiatan\s*:\s*([^,]+)/i) || rowText.match(/Tanggal Kegiatan\s*:\s*([^,]+)/i) || [])[1] || '';
-          const type = /^(Utama|Pendukung)$/i.test(cells[typeIndex]) ? cells[typeIndex] : 'Pendukung';
-          const result = cells[resultIndex] || 'Selesai';
-          const isBreak = /^(?:istirahat(?:\s+(?:siang|makan|shalat|makan\s+siang))?|ishoma(?:\s+dan\s+shalat)?|istirahat\s*,?\s*shalat(?:\s+dan\s+makan)?)(?:\s*[-–—].*)?$/i.test(description);
-          output.push({ rawDate, start: times[0], end: times[1], description, type, result, isBreak });
-        }
-      }
-      return { rows: output, recognized };
-    });
-    const normalized = entries.rows.map(entry => ({ ...entry, date: normalizeOfficialDate(entry.rawDate) }));
-    normalized.sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
-    normalized.available = entries.recognized;
-    if (!normalized.available) normalized.warning = 'Tabel kegiatan LLK halaman pertama tidak ditemukan.';
-    normalized.sourceUrl = sourceUrl;
-    normalized.pagesScanned = 1;
-    cacheCalendarEntries(id, normalized);
-    return normalized;
-  } catch (error) {
-    if (id) calendarEntries.delete(id);
-    throw error;
-  } finally {
-    if (owned) await page.close();
-  }
-}
-async function extractCsrfToken(page, context) {
-  const selectors = ['input[name="_token"]', 'input[name="csrf_token"]', 'input[name="_csrf"]', 'meta[name="csrf-token"]'];
-  for (const sel of selectors) {
-    const el = page.locator(sel).first();
-    if (await el.count()) {
-      const val = (await el.getAttribute(sel.startsWith('meta') ? 'content' : 'value'))?.trim();
-      if (val) return val;
-    }
-  }
-  const cookies = await context.cookies(LLK_BASE);
-  const xsrf = cookies.find(c => /XSRF-TOKEN/i.test(c.name));
-  if (xsrf?.value) {
-    try { return decodeURIComponent(xsrf.value); } catch { return xsrf.value; }
-  }
-  throw new Error('CSRF token tidak ditemukan pada halaman LLK');
+async function scrapeEntries(client, id=sessionEmployee?.id) {
+  try{const entries=await readEntries(client,{scope:'all',progress:(stage,message,detail)=>progress(id,stage,message,detail)});cacheCalendarEntries(id,entries);return entries;}
+  catch(error){if(id)calendarEntries.delete(id);throw error;}
 }
 function submissionResponseInfo(response) {
-  const headers = response.headers(), mediaType = String(headers['content-type'] || '').split(';', 1)[0].trim().toLowerCase();
-  const info = { status: response.status(), contentType: ['text/html', 'application/json', 'text/plain'].includes(mediaType) ? mediaType : 'other', redirect: 'none' };
+  const headers=Object.fromEntries(response.headers),mediaType=String(headers['content-type']||'').split(';',1)[0].trim().toLowerCase();
+  const info={status:response.status,contentType:['text/html','application/json','text/plain'].includes(mediaType)?mediaType:'other',redirect:'none'};
   if (headers.location) {
     try {
       const target = new URL(headers.location, LLK_BASE);
@@ -377,50 +236,59 @@ function submissionResponseInfo(response) {
 }
 async function submitPreview(id, rawPreview, policy) {
   const preview = await validatePreview(rawPreview); if (!['skip','abort'].includes(policy)) bad('duplicatePolicy harus skip atau abort');
-  const { employee, context } = await launchEmployee(id), report={ at:new Date().toISOString(), employee:{id:employee.id,name:employee.name}, duplicatePolicy:policy, results:[] };
-  try {
-    const existingEntries=await scrapeEntries(context),existingDates=new Set(existingEntries.map(entry=>entry.date));
+  const employee=await findEmployee(id),client=await employeeClient(id),report={at:new Date().toISOString(),employee:{id:employee.id,name:employee.name},duplicatePolicy:policy,results:[]};
+    const existingEntries=await scrapeEntries(client),existingDates=new Set(existingEntries.dates);
     const duplicateDates=preview.filter(day=>existingDates.has(day.date)).map(day=>day.date);
     if (duplicateDates.length && policy==='abort') {
-      report.results=preview.map(day=>({date:day.date,state:duplicateDates.includes(day.date)?'skipped':'ready',status:duplicateDates.includes(day.date)?'duplicate':'ready',statusLabel:duplicateDates.includes(day.date)?'Tanggal sudah ada di LLK':'Belum dikirim',submitted:false,skipped:duplicateDates.includes(day.date),failed:false,verified:duplicateDates.includes(day.date),error:duplicateDates.includes(day.date)?'Tanggal sudah memiliki LLK pada halaman pertama; pengiriman seluruh rentang dibatalkan':undefined}));
+      report.results=preview.map(day=>({date:day.date,state:duplicateDates.includes(day.date)?'skipped':'ready',status:duplicateDates.includes(day.date)?'duplicate':'ready',statusLabel:duplicateDates.includes(day.date)?'Tanggal sudah ada di LLK':'Belum dikirim',submitted:false,skipped:duplicateDates.includes(day.date),failed:false,verified:duplicateDates.includes(day.date),error:duplicateDates.includes(day.date)?'Tanggal sudah memiliki LLK; pengiriman seluruh rentang dibatalkan':undefined}));
       await saveJson(reportFile(id),report);
       throw new HttpError(409,`Tanggal sudah ada di LLK: ${duplicateDates.join(', ')}. Tidak ada tanggal yang dikirim.`);
     }
     if (preview.every(day => existingDates.has(day.date))) {
-      report.results = preview.map(day => ({ date: day.date, state: 'skipped', status: 'duplicate', statusLabel: 'Sudah ada di LLK', message: 'Dilewati karena tanggal sudah memiliki LLK pada halaman pertama', submitted: false, skipped: true, failed: false, verified: true, itemCount: day.items.length }));
+      report.results=preview.map(day=>({date:day.date,state:'skipped',status:'duplicate',statusLabel:'Sudah ada di LLK',message:'Dilewati karena tanggal sudah memiliki LLK',submitted:false,skipped:true,failed:false,verified:true,itemCount:day.items.length}));
       report.success = 0;
       report.skipped = report.results.length;
       report.failed = 0;
       await saveJson(reportFile(id), report);
       return report;
     }
-    const page = await context.newPage();
     const supervisorNip = employeeId(employee.supervisor.nip);
     for (const day of preview) {
       progress(id, 'send-date', `Memproses ${day.date} (${report.results.length + 1}/${preview.length})…`, { status: 'Berjalan' });
       if (existingDates.has(day.date)) {
-        report.results.push({date:day.date,state:'skipped',status:'duplicate',statusLabel:'Sudah ada di LLK',message:'Dilewati karena tanggal sudah memiliki LLK di halaman pertama',submitted:false,skipped:true,failed:false,verified:true,itemCount:day.items.length});
-        progress(id, 'send-result', `${day.date}: dilewati karena sudah ada di halaman 1 LLK.`, { status: 'Info' });
+        report.results.push({date:day.date,state:'skipped',status:'duplicate',statusLabel:'Sudah ada di LLK',message:'Dilewati karena tanggal sudah memiliki LLK',submitted:false,skipped:true,failed:false,verified:true,itemCount:day.items.length});
+        progress(id,'send-result',`${day.date}: dilewati karena sudah ada di LLK.`,{status:'Info'});
         continue;
       }
       const result={date:day.date,state:'failed',status:'failed',statusLabel:'Gagal dikirim',submitted:false,skipped:false,failed:true,verified:false,itemCount:day.items.length,payload:{date:day.date,items:day.items}};
       let submissionStarted = false;
       try {
         if (!/^\d{18}$/.test(supervisorNip)) throw new Error('NIP atasan tidak valid. Pengiriman dibatalkan.');
-        await openLlkCreateForm(page);
-        const liveSupervisor = await resolveLlkSupervisor(page, supervisorNip);
+        const page=await openCreate(client);
+        const liveSupervisor=await resolveSupervisor(client,supervisorNip,page);
         if (liveSupervisor.nip !== supervisorNip || !liveSupervisor.id || !liveSupervisor.name) throw new Error('Lookup atasan tidak lengkap. Pengiriman dibatalkan.');
-        employee.supervisor = { id: liveSupervisor.id, nip: liveSupervisor.nip, name: liveSupervisor.name, verified: true, source: 'llk-select2' };
-        const token = await extractCsrfToken(page, context);
+        employee.supervisor={id:liveSupervisor.id,nip:liveSupervisor.nip,name:liveSupervisor.name,verified:true,source:'llk-http-select2'};
+        const form=page.$('form[action*="/llk/save"]').first();
+        const token=page.$('input[name="_token"]').first().val();
+        if(!form.length||!token)throw new Error('Form simpan atau token CSRF tidak ditemukan. Tidak dikirim.');
         const [year,month,date]=day.date.split('-');
         const payload=new URLSearchParams({redirect:`${LLK_BASE}/llk`,_token:token,'author[name]':employee.name,'author[nip]':employee.nip,'author[jabatan_text]':employee.position,'supervisor[nip]':liveSupervisor.id,'supervisor[name]':liveSupervisor.name,activity_date:`${date}-${month}-${year}`});
         for (const item of day.items) { payload.append('items[start_time][]',item.start); payload.append('items[end_time][]',item.end); payload.append('items[description][]',item.description); payload.append('items[type][]',item.type==='Utama'?'primary':'support'); payload.append('items[result][]',item.result); payload.append('items[note][]',''); payload.append('items[id][]',''); }
         calendarEntries.delete(id);
         submissionStarted = true;
-        const response=await context.request.post(`${LLK_BASE}/llk/save`,{headers:{'content-type':'application/x-www-form-urlencoded',referer:`${LLK_BASE}/llk/create`},data:payload.toString(),maxRedirects:0,maxRetries:0});
+        const saveUrl=new URL(form.attr('action'),page.url);
+        if(saveUrl.origin!==LLK_BASE||saveUrl.pathname!=='/llk/save')throw new Error('Tujuan form simpan tidak sesuai.');
+        const response=(await client.post(saveUrl,payload,page.url)).response;
         const responseInfo = submissionResponseInfo(response);
         result.httpStatus = responseInfo.status;
         result.submitted = responseInfo.status === 303 && responseInfo.redirect === 'llk-list';
+        if(result.submitted){
+          const confirmed=await scrapeEntries(client);
+          const rows=confirmed.filter(entry=>entry.date===day.date);
+          const stored=day.items.every(item=>rows.some(row=>row.start===item.start&&row.end===item.end&&clean(row.description)===clean(item.description)&&row.type===item.type&&clean(row.result)===clean(item.result)));
+          if(!confirmed.dates.includes(day.date)||!stored){result.submitted=false;throw new Error('Isi LLK belum terbukti tersimpan. Periksa LLK sebelum mencoba lagi.');}
+          existingDates.add(day.date);
+        }
         if (result.submitted) {
           result.state = 'saved';
           result.status = 'awaiting_supervisor';
@@ -456,38 +324,14 @@ async function submitPreview(id, rawPreview, policy) {
     report.failed = report.results.filter(item => item.failed).length;
     await saveJson(reportFile(id), report);
     return report;
-  } finally {
-    try { storeSessionCookies(id, await context.cookies()); } finally { await context.close(); }
-  }
-}
-function slug(text) { return clean(text).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,''); }
-async function importVerifier(id, existingContext, existingPage){
-  const owned=!existingContext,{context}=existingContext?{context:existingContext}:await launchEmployee(id);
-  try {
-    const page=existingPage||(existingContext?await requireAuthenticatedLlkPage(context):await context.newPage());
-    if(!llkLocation(page.url()).authenticated){await page.goto(LLK_BASE,{waitUntil:'domcontentloaded'});if(!llkLocation(page.url()).authenticated)throw new HttpError(401,'Sesi LLK kedaluwarsa; login ulang diperlukan');}
-    let routes=await discoverLlkRoutes(page),profileUrl=discoveredRoute(routes,[/\bprofil(?:e)?\b/,/\bakun\b/]);
-    if(profileUrl){const result=await navigateFeature(page,profileUrl);if(!result.available)await page.goto(LLK_BASE,{waitUntil:'domcontentloaded'});}
-    const profile=await page.evaluate(()=>{const cleanText=value=>String(value||'').replace(/\s+/g,' ').trim();const all=[...document.querySelectorAll('body *')];const labeled=label=>{const node=all.find(el=>new RegExp(`^${label}\\s*:?$`,'i').test(cleanText(el.textContent)));if(!node)return '';return cleanText(node.nextElementSibling?.textContent||node.parentElement?.textContent).replace(new RegExp(`^${label}\\s*:?\\s*`,'i'),'');};const combined=cleanText(document.querySelector('.dropdown-toggle')?.textContent);const nip=(combined.match(/\b\d{8,20}\b/)||[])[0]||labeled('NIP').match(/\d{8,20}/)?.[0]||'';const name=cleanText(document.querySelector('[data-profile-name], .profile-name, h4')?.textContent)||labeled('Nama')||cleanText(combined.replace(nip,'').replace(/NIP\s*:?/i,''));return {name,nip};});
-    const verifier={employeeId:id,name:clean(profile.name),nip:employeeId(profile.nip)};
-    routes=await discoverLlkRoutes(page);const verifierUrl=discoveredRoute(routes,[/verifikasi/,/verifikator/,/pegawai.*verifikasi/]);
-    const navigation=await navigateFeature(page,verifierUrl);
-    if(!navigation.available)return {available:false,verifier,employees:[],warning:'Tahap verifikator: daftar pegawai tidak tersedia untuk akun ini.'};
-    const rows=await page.evaluate(()=>{const text=e=>String(e?.textContent||'').replace(/\s+/g,' ').trim();return [...document.querySelectorAll('table tbody tr')].map((row,index)=>{const cells=[...row.querySelectorAll('td')].map(text);const link=row.querySelector('a[href]');return {routeId:link?.getAttribute('href')?.split('/').filter(Boolean).pop()||String(index),nip:(cells.join(' ').match(/\b\d{8,20}\b/)||[])[0]||'',name:cells.find(x=>x&&!/^\d+$/.test(x))||''};}).filter(x=>x.name);});
-    if(!rows.length)return {available:false,verifier,employees:[],warning:'Tahap verifikator: daftar pegawai tidak tersedia untuk akun ini.'};
-    const relationships={available:true,importedAt:new Date().toISOString(),verifier,employees:rows.map(row=>({employeeId:employeeId(row.nip)||slug(row.name),name:clean(row.name),llkRouteId:clean(row.routeId)}))};
-    await audit('verifier.import',id,{employeeCount:relationships.employees.length},{counts:{employees:relationships.employees.length},result:'imported'});return relationships;
-  } finally {if(owned)await context.close();}
 }
 async function templateSnapshot(){const templates=await readJson(templateFile);return templates.version&&templates.departments?templates:{version:1,updatedAt:null,departments:templates};}
 async function readPersonal(id){return personalTemplates.get(id)||null;}
 function validatePersonal(value,id){if(!value||typeof value!=='object'||value.employeeId!==id||!Array.isArray(value.activities)||value.activities.length>1000)bad('Daftar kegiatan profil tidak valid');const activities=value.activities.map(a=>{const nama=clean(a?.nama),kategori=clean(a?.kategori)||'Pendukung';if(!nama||isBreakActivity(nama)||!['Utama','Pendukung'].includes(kategori))bad('Kegiatan profil tidak valid');return {nama,kategori,result:'Selesai',...(a.start?{start:clean(a.start)}:{}),...(a.end?{end:clean(a.end)}:{})};});return {...value,activities};}
 async function personalResponse(employee){const personal=await readPersonal(employee.id),stored=await readJson(templateFile),departments=stored.departments||stored,fallback=departments[employee.department];return {source:personal?.activities?.length?'personal':'department',personal,activities:personal?.activities?.length?personal.activities:(fallback?.activities||[]),fallbackLabel:fallback?.label||employee.department};}
-async function importPersonal(id, existingContext, existingPage) {
-  const owned = !existingContext, { context } = existingContext ? { context: existingContext } : await launchEmployee(id);
-  try {
-    const entries = await scrapeEntries(context, existingPage, id), current = await readPersonal(id);
-    if (entries.available === false) return { available: false, current, candidate: null, warning: entries.warning || 'Tahap riwayat: data LLK tidak tersedia; template pribadi tidak diubah.' };
+async function importPersonal(id, client=sessionClient) {
+    const entries=await readEntries(client,{scope:'last'}),current=await readPersonal(id);
+    if(entries.available===false)return {available:false,current,candidate:null,warning:'Riwayat LLK tidak tersedia; template pribadi tidak diubah.'};
     const seen = new Map();
     for (const entry of Array.isArray(entries) ? entries : []) {
       const nama = clean(entry.description);
@@ -504,269 +348,37 @@ async function importPersonal(id, existingContext, existingPage) {
     const stageToken = randomBytes(16).toString('hex'), digest = createHash('sha256').update(canonical(candidate)).digest('hex');
     stagedPersonal.set(id, { stageToken, token: stageToken, digest, candidate, expires: Date.now() + 15 * 60 * 1000 });
     return { available: true, current, candidate, activities, scannedEntries: entries.length, pagesScanned: entries.pagesScanned || 1, sourceUrl: entries.sourceUrl || null, stageToken, digest, diff: { added: activities.length, modified: 0, removed: current?.activities?.length || 0 } };
-  } finally { if (owned) await context.close(); }
 }
 
-async function openLlkCreateForm(page) {
-  await page.goto(LLK_BASE, { waitUntil: 'domcontentloaded', timeout: 60000 });
-  const llkMenu = page.locator('a[href="/llk"], a[href="https://llk.mahkamahagung.go.id/llk"]').first();
-  if (!await llkMenu.count()) throw new Error('Menu LLK tidak ditemukan dari dashboard');
-  await Promise.all([
-    page.waitForURL(url => url.origin === LLK_BASE && /^\/llk(?:\/|$)/.test(url.pathname), { waitUntil: 'domcontentloaded', timeout: 60000 }),
-    llkMenu.evaluate(link => link.click())
-  ]);
-  if (!/^\/llk(?:\/|$)/i.test(new URL(page.url()).pathname)) throw new Error(`Menu LLK tidak membuka daftar LLK: ${page.url()}`);
-  const createLink = page.locator('a[href="https://llk.mahkamahagung.go.id/llk/create"], a[href="/llk/create"]').first();
-  if (!await createLink.count()) throw new Error(`Tombol buat LLK tidak ditemukan: ${page.url()}`);
-  await Promise.all([
-    page.waitForURL(url => url.origin === LLK_BASE && /^\/llk\/create(?:\/|$)/.test(url.pathname), { waitUntil: 'domcontentloaded', timeout: 60000 }),
-    createLink.evaluate(link => link.click())
-  ]);
-  if (!await page.locator('#snip, [name="supervisor[nip]"]').count()) throw new Error('Kontrol NIP Pejabat Atasan tidak ditemukan pada form buat LLK');
+async function enrichEmployeeFromSso(employee,client) {
+  const profile=await readProfile(client),selected=await resolveSupervisor(client,employee.supervisor.nip);
+  return {...employee,...profile,accountIdentity:profile,supervisor:{id:selected.id,nip:selected.nip,name:selected.name,verified:true,source:'llk-http-select2'},supervisorLookup:{attempted:true,nip:selected.nip,name:selected.name,control:selected.control,url:selected.url}};
 }
 
-async function resolveLlkSupervisor(page, nip) {
-  const binding = await page.evaluate(() => {
-    const normalize = value => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
-    const nodes = [...document.querySelectorAll('label,td,th,span,div')];
-    const label = nodes.find(node => /^\*?\s*nip pejabat atasan\s*:?$/i.test(normalize(node.textContent)));
-    if (!label) return { url: location.href, text: normalize(document.body.innerText).slice(0, 500), nipControl: null, nameControl: null };
-    const row = label.closest('tr,.form-group,.control-group,.row') || label.parentElement;
-    const root = row?.parentElement || document;
-    const nipControl = row?.querySelector('input,select,[class*="select2-container"],[class*="select2-choice"]') || root.querySelector('input,select,[class*="select2-container"],[class*="select2-choice"]');
-    const nameLabel = nodes.find(node => /^\*?\s*pejabat atasan\s*:?$/i.test(normalize(node.textContent)) && node !== label);
-    const nameRow = nameLabel?.closest('tr,.form-group,.control-group,.row') || nameLabel?.parentElement;
-    const nameControl = nameRow?.querySelector('input:not([type="hidden"]),textarea');
-    return { url: location.href, nipControl: nipControl ? { id: nipControl.id, name: nipControl.getAttribute('name'), className: nipControl.className, tag: nipControl.tagName } : null, nameControl: nameControl ? { id: nameControl.id, name: nameControl.getAttribute('name') } : null };
-  });
-  if (!binding.nipControl) throw new Error(`Kontrol NIP Pejabat Atasan tidak ditemukan pada ${binding.url}: ${binding.text || ''}`);
-  const trigger = binding.nipControl.id === 'snip'
-    ? page.locator('.select2-selection[aria-labelledby="select2-snip-container"]').first()
-    : binding.nipControl.id
-      ? page.locator(`#${binding.nipControl.id} + .select2 .select2-selection, #${binding.nipControl.id} + [class*="select2-container"] [role="combobox"]`).first()
-      : page.locator(`[name="${binding.nipControl.name}"] + .select2 .select2-selection, [name="${binding.nipControl.name}"] + [class*="select2-container"] [role="combobox"]`).first();
-  if (!await trigger.count()) throw new Error(`Kontrol Select2 NIP Pejabat Atasan tidak terlihat untuk ${nip}`);
-  await trigger.click();
-  const search = page.locator('.select2-container--open .select2-search__field, .select2-drop-active .select2-input, .select2-search input').first();
-  await search.waitFor({ state: 'visible', timeout: 10000 });
-  await search.fill(nip);
-  const option = page.locator('.select2-results__option:not([aria-disabled="true"]), .select2-result-selectable').filter({ hasText: new RegExp(nip) }).first();
-  await option.waitFor({ state: 'visible', timeout: 15000 });
-  const resultText = clean(await option.textContent());
-  await option.click();
-  const selectedValue = clean(await page.locator(`#${binding.nipControl.id}, [name="${binding.nipControl.name}"]`).first().inputValue());
-  const nameField = binding.nameControl ? page.locator(`#${binding.nameControl.id}, [name="${binding.nameControl.name}"]`).first() : page.locator('input[readonly], input[disabled]').filter({ hasNot: page.locator('[type="hidden"]') }).last();
-  await nameField.waitFor({ state: 'visible', timeout: 10000 });
-  const name = clean(await nameField.inputValue());
-  if (!selectedValue || !name) throw new Error(`Pilihan atasan belum lengkap untuk NIP ${nip}`);
-  return { id: selectedValue, nip, name, url: page.url(), resultText, control: 'interactive-select2' };
-}
-async function enrichEmployeeFromSso(employee, page) {
-  const originalUrl = page.url();
-  await page.goto(`${LLK_BASE}/profile`, { waitUntil: 'domcontentloaded', timeout: 60000 });
-  const profile = await page.evaluate(() => {
-    const clean = value => String(value || '').replace(/\s+/g, ' ').trim();
-    const read = label => {
-      const node = [...document.querySelectorAll('th, dt, label, div')].find(item => clean(item.textContent) === label);
-      const container = node?.closest('tr, dl, .row, .form-group') || node?.parentElement;
-      const values = [...(container?.querySelectorAll('td, dd, [class*="col-"]') || [])].map(item => clean(item.textContent)).filter(value => value && value !== label);
-      return values.at(-1) || '';
-    };
-    return { name: read('Nama Lengkap'), nip: read('NIP'), position: read('Jabatan'), satker: read('Satuan Kerja').replace(/^\(\d+\)\s*/, '') };
-  });
-  const requestedNip = employeeId(employee.supervisor.nip) || clean(employee.supervisor.id);
-  const lookup = { attempted: Boolean(requestedNip), nip: requestedNip, name: '', control: 'live-page-fetch', select2: true };
-  if (requestedNip) {
-    try {
-      await openLlkCreateForm(page);
-      const selected = await resolveLlkSupervisor(page, requestedNip);
-      lookup.name = selected.name;
-      lookup.resultText = selected.resultText;
-      lookup.url = selected.url;
-      lookup.control = selected.control;
-    } catch (error) {
-      lookup.error = clean(error.message).slice(0, 500);
-    }
-  }
-  if (originalUrl && originalUrl !== page.url()) await page.goto(originalUrl, { waitUntil: 'domcontentloaded' }).catch(() => {});
-  const name = clean(profile.name), nip = employeeId(profile.nip), position = clean(profile.position), satker = clean(profile.satker), supervisorName = clean(lookup.name);
-  const updated = {
-    ...employee,
-    name: name.length > 3 ? name : employee.name,
-    nip: nip || employee.nip,
-    position: position.length > 3 ? position : employee.position,
-    satker: satker.length > 3 ? satker : employee.satker,
-    supervisor: { id: requestedNip || employee.supervisor.id, nip: requestedNip || employee.supervisor.nip, name: supervisorName || employee.supervisor.name, verified: Boolean(requestedNip && supervisorName), source: supervisorName ? 'llk-select2' : 'pending-lookup' },
-    accountIdentity: { name, nip, position, satker },
-    supervisorLookup: lookup
-  };
-  return updated;
-}
-
-async function launchExternalBootstrap(satker, supervisorNip, department = 'umum_keuangan') {
+async function launchBuiltInBootstrap(input) {
   const tempId = `temp-${randomBytes(12).toString('hex')}`;
-  const employee = { id:tempId, nip:'', name:'Pegawai Baru', position:'Pegawai / Pelaksana', department, satker:clean(satker)||'Satker Lain', supervisor:{id:supervisorNip,nip:supervisorNip,name:''} };
-  const context = await launchSessionContext(false);
-  return {employee,context,tempId};
+  const employee = { id:tempId, nip:'', name:'Pegawai Baru', position:'Pegawai / Pelaksana', department:input.department || 'umum_keuangan', satker:clean(input.satker)||'Satker Lain', supervisor:{id:input.supervisorNip,nip:input.supervisorNip,name:''} };
+  const auth = new CasAuth();
+  try { await auth.login(input.username, input.password); }
+  catch (error) { auth.close(); throw error; }
+  finally { input.password = ''; }
+  return {employee, auth, tempId};
 }
 
-async function completeExternalBootstrap(tempId, tempEmployee, context) {
-  const page = await requireAuthenticatedLlkPage(context);
-  const enrichedDraft = await enrichEmployeeFromSso(tempEmployee, page);
-  const actualNip = enrichedDraft.accountIdentity.nip;
-  if (!/^\d{18}$/.test(actualNip) || !enrichedDraft.accountIdentity.name) throw new HttpError(401, 'Identitas akun login SSO tidak terdeteksi dari profil LLK');
-  if (!enrichedDraft.supervisor.verified) throw new HttpError(422, enrichedDraft.supervisorLookup.error || 'Atasan belum dapat diverifikasi dari LLK');
-  const enriched = { ...enrichedDraft, id: actualNip, nip: actualNip };
-  try {
-    const history = await importPersonal(actualNip, context, page);
-    const cookies = await context.cookies();
-    await minimizeLoginWindow(context).catch(error => console.warn('SSO tidak dapat diminimalkan:', error.message));
-    const flow = loginFlows.get(tempId);
-    if (!flow || flow.closed || flow.closing || stopping) throw new HttpError(401, 'Sesi login berakhir. Mulai login SSO kembali.');
-    if (history?.candidate) personalTemplates.set(actualNip, validatePersonal(history.candidate, actualNip));
-    stagedPersonal.delete(actualNip);
-    storeSessionCookies(actualNip, cookies);
-    sessionEmployee = enriched;
-    flow.completed = true;
-    flow.actualNip = actualNip;
-    flow.fetchedAt = new Date().toISOString();
-    flow.result = { employee: enriched, verifier: { available: false, warning: null }, history, sessionActive: true, tempId };
-    return flow.result;
-  } catch (error) { stagedPersonal.delete(actualNip); throw error; }
+async function completeBootstrap(tempId,flow) {
+  const client=flow.client ||= new LlkHttp(flow.auth.cookies());
+  const enriched=await enrichEmployeeFromSso(flow.employee,client),actualNip=enriched.nip;
+  if(!/^\d{18}$/.test(actualNip)||!enriched.name)throw new HttpError(401,'Identitas LLK tidak terbaca.');
+  enriched.id=actualNip;
+  const history=await importPersonal(actualNip,client);
+  await scrapeEntries(client,actualNip);
+  if(flow.closing||stopping)throw new HttpError(401,'Sesi login berakhir.');
+  if(history.candidate)personalTemplates.set(actualNip,validatePersonal(history.candidate,actualNip));
+  stagedPersonal.delete(actualNip);sessionEmployee=enriched;sessionClient=client;flow.client=null;
+  clearTimeout(flow.timer);flow.auth.close();loginFlows.delete(tempId);
+  return {employee:enriched,history,verifier:{available:false,warning:null},sessionActive:true,tempId};
 }
 
-async function verificationTargets(id, context, extractIds = true) {
-  progress(id,'launch','Memuat sesi LLK aktif di browser headless…');
-  try {
-    const page=context.pages()[0]??await context.newPage();
-    if(!llkLocation(page.url()).authenticated){
-      await page.goto(LLK_BASE,{waitUntil:'domcontentloaded'});
-      if(!llkLocation(page.url()).authenticated)throw new HttpError(401,'Sesi LLK kedaluwarsa; login ulang diperlukan');
-    }
-    const menu=page.locator('a[href="/verifikasi"], a[href="https://llk.mahkamahagung.go.id/verifikasi"]').first();
-    const pendingCount=await menu.evaluate(node=>{const text=String(node.textContent||'').replace(/\s+/g,' ').trim(),badge=node.querySelector('.badge,.label,[class*="badge"],[class*="label"]'),raw=String(badge?.textContent||text).match(/\b(\d+)\b/)?.[1];return Number(raw||0);}).catch(()=>0);
-    if(!pendingCount){
-      progress(id,'complete','Menu Verifikasi LLK tidak memiliki badge merah. Tidak ada LLK yang perlu diverifikasi.',{url:page.url(),pendingCount:0});
-      return Object.assign([],{pagesScanned:0,rowsFound:0,validCount:0,invalidCount:0,invalidTargets:[]});
-    }
-    progress(id,'home',`Badge Verifikasi LLK menunjukkan ${pendingCount} target. Membuka daftar verifikasi…`,{url:page.url(),pendingCount});
-    await Promise.all([page.waitForURL(url=>url.origin===LLK_BASE&&/^\/verifikasi(?:\/|$)/i.test(url.pathname),{timeout:15000,waitUntil:'domcontentloaded'}),menu.click()]);
-    await page.waitForLoadState('domcontentloaded',{timeout:15000});
-    progress(id,'verification','Halaman Verifikasi LLK terbuka. Menerapkan filter Belum Terverifikasi…',{url:page.url()});
-    if(!/^\/verifikasi(?:\/|$)/i.test(new URL(page.url()).pathname))throw new HttpError(401,`Menu Verifikasi LLK gagal dibuka; URL ${page.url()}`);
-    const statusControl=page.locator('input[name="status"][value="1"], select[name="status"]').first();
-    if(!await statusControl.count())throw new Error('Kontrol filter status verifikasi tidak ditemukan');
-    if(await statusControl.evaluate(node=>node.tagName==='SELECT'))await statusControl.selectOption('1');
-    else await statusControl.check({force:true});
-    const byControl=page.locator('input[name="by"][value="nip"], select[name="by"]').first();
-    if(await byControl.count()){
-      if(await byControl.evaluate(node=>node.tagName==='SELECT'))await byControl.selectOption('nip');
-      else await byControl.check({force:true});
-    }
-    const searchButton=page.locator('button,input[type="submit"]').filter({hasText:/Cari|Search/i}).first();
-    if(!await searchButton.count())throw new Error('Tombol Cari verifikasi tidak ditemukan');
-    progress(id,'filter-submit','Tombol Cari diklik. Menunggu navigasi hasil filter sampai DOM siap…',{url:page.url()});
-    await searchButton.click({noWaitAfter:true});
-    await page.waitForLoadState('domcontentloaded',{timeout:60000}).catch(error=>{throw new Error(`Halaman hasil filter belum siap setelah 60 detik: ${error.message}`);});
-    progress(id,'filter-table','DOM hasil filter siap. Menunggu tabel hasil hingga 60 detik…',{url:page.url(),readyState:await page.evaluate(()=>document.readyState)});
-    await page.locator('table').first().waitFor({state:'visible',timeout:60000});
-    const appliedFilter=await page.evaluate(()=>{
-      const status=document.querySelector('input[name="status"]:checked,select[name="status"]');
-      const by=document.querySelector('input[name="by"]:checked,select[name="by"]');
-      return {status:status?.value||'',by:by?.value||'',url:location.href};
-    });
-    const appliedUrl=new URL(appliedFilter.url);
-    if(appliedFilter.status!=='1'||appliedFilter.by!=='nip'||appliedUrl.searchParams.get('status')!=='1'||appliedUrl.searchParams.get('by')!=='nip')throw new Error(`Filter belum diterapkan: status=${appliedFilter.status||'kosong'}, berdasarkan=${appliedFilter.by||'kosong'}, URL=${appliedFilter.url}`);
-    progress(id,'filter','Filter Belum Terverifikasi dan pencarian berdasarkan NIP telah terbukti aktif.',appliedFilter);
-    await page.locator('table').first().waitFor({state:'visible',timeout:15000}).catch(()=>{});
-    await page.waitForTimeout(750);
-    if(!llkLocation(page.url()).authenticated)throw new HttpError(401,'Sesi LLK kedaluwarsa; login ulang diperlukan');
-    const rows=[],visited=new Set();
-    for(let pageNum=1;pageNum<=100;pageNum++){
-      const currentUrl=page.url();
-      if(visited.has(currentUrl))break;
-      visited.add(currentUrl);
-      let pageRows;
-      progress(id,'page',`Memindai halaman verifikasi ${pageNum}…`,{page:pageNum,url:currentUrl});
-      for(let attempt=0;attempt<5;attempt++){
-        try{
-          pageRows=await page.evaluate(()=>{
-            const text=node=>String(node?.textContent||'').replace(/\s+/g,' ').trim();
-            return [...document.querySelectorAll('a[href*="/verifikasi/edit?cid="]')].map(link=>{
-              const outerRow=link.closest('tr'),detailCell=Array.from(outerRow?.cells||[]).find(cell=>cell.querySelector('table')),nested=detailCell?.querySelector('table');
-              const header=text(detailCell?.querySelector('div'));
-              const rawDate=(header.match(/Tanggal Kegiatan\s*:\s*([^,]+)/i)||[])[1]||'';
-              const activities=Array.from(nested?.tBodies[0]?.rows||[]).map(row=>{const cells=Array.from(row.cells||[]).map(text),times=(cells[1]||'').match(/\b(?:[01]\d|2[0-3]):[0-5]\d\b/g)||[];return {start:times[0]||'',end:times[1]||'',description:cells[3]||'',type:cells[4]||'',result:cells[5]||''};}).filter(item=>item.start&&item.end);
-              return {editUrl:link.href,summary:text(outerRow).slice(0,500),rawDate,activities};
-            });
-          });
-          break;
-        }catch(error){if(!/Execution context was destroyed|navigation/i.test(error.message)||attempt===4)throw error;await page.waitForTimeout(1000);}
-      }
-      rows.push(...(pageRows||[]));
-      progress(id,'page-result',`Halaman ${pageNum}: ${(pageRows||[]).length} target terbaca.`,{page:pageNum,rowsFound:(pageRows||[]).length});
-      const next=page.locator('ul.pagination li:not(.disabled):not(.active) a[rel="next"], ul.pagination li:not(.disabled):not(.active) a').filter({hasText:/^(?:Next|Berikut|›|»|\d+)$/i}).last();
-      if(!await next.count())break;
-      const href=await next.getAttribute('href');
-      if(!href||visited.has(new URL(href,page.url()).href))break;
-      await Promise.all([page.waitForLoadState('domcontentloaded').catch(()=>{}),next.click()]);
-    }
-    const uniqueRows=[...new Map(rows.map(row=>[row.editUrl,row])).values()];
-    const dateCounts=new Map();
-    progress(id,'validate',`Ditemukan ${uniqueRows.length} target. Memvalidasi tanggal, jam akhir, dan deskripsi…`,{rowsFound:uniqueRows.length,pagesScanned:visited.size});
-    for(const row of uniqueRows){
-      if(!row.rawDate)row.rawDate=(row.summary.match(/Tanggal Kegiatan\s*:\s*([^,]+)/i)||[])[1]||'';
-      row.date=normalizeOfficialDate(row.rawDate);
-      if(!row.activities?.length){const times=row.summary.match(/\b(?:[01]\d|2[0-3]):[0-5]\d\b/g)||[];row.activities=times.length>=2?[{start:times[0],end:times.at(-1),description:(row.summary.match(/\d+\s+[^\s]+\s+-\s+[^\s]+\s+\d+\s+(.+?)\s+(?:Utama|Pendukung)\b/i)||[])[1]||''}]:[];}
-      if(row.date)dateCounts.set(row.date,(dateCounts.get(row.date)||0)+1);
-    }
-    for(const row of uniqueRows){
-      const issues=[];
-      if(!row.date)issues.push(`Tanggal kegiatan tidak terbaca dari: ${row.rawDate||'kosong'}`);
-      else if(dateCounts.get(row.date)>1)issues.push(`Tanggal duplikat: ${row.date}`);
-      const end=row.activities?.at(-1)?.end||'';
-      const dow=row.date?parseDate(row.date).getDay():null,expectedEnd=dow===5?'17:00':dow>=1&&dow<=4?'16:30':null;
-      if(!row.activities?.length)issues.push('Rincian kegiatan tidak terbaca dari tabel target');
-      else if(expectedEnd&&end!==expectedEnd)issues.push(`Jam akhir ${end||'tidak terbaca'}; seharusnya ${expectedEnd}`);
-      const work=row.activities?.filter(item=>!isBreakActivity(item.description))||[];
-      if(row.activities?.length&&!work.length)issues.push('Deskripsi kegiatan hanya berisi Istirahat');
-      else if(work.some(item=>!clean(item.description)||clean(item.description).length<4))issues.push('Deskripsi kegiatan belum benar atau tidak terbaca');
-      row.valid=issues.length===0;row.issues=issues;
-    }
-    const validRows=uniqueRows.filter(row=>row.valid),invalidRows=uniqueRows.filter(row=>!row.valid);
-    if(!extractIds){
-      const preview=uniqueRows.map(row=>({date:row.date,summary:row.summary,editUrl:row.editUrl,activities:row.activities,valid:row.valid,issues:row.issues}));
-      progress(id,'preview',`Validasi selesai: ${validRows.length} siap, ${invalidRows.length} belum benar.`,{validCount:validRows.length,invalidCount:invalidRows.length});
-      preview.pagesScanned=visited.size;preview.rowsFound=uniqueRows.length;preview.validCount=validRows.length;preview.invalidCount=invalidRows.length;
-      return preview;
-    }
-    if(!validRows.length)return Object.assign([],{pagesScanned:visited.size,rowsFound:uniqueRows.length,validCount:0,invalidCount:invalidRows.length,invalidTargets:invalidRows});
-    const extracted=[];
-    for(const [index,row] of validRows.entries()){
-      const started=Date.now();progress(id,'target-fetch',`Membaca ID target ${index+1}/${validRows.length}…`,{target:index+1,totalTargets:validRows.length,date:row.date});
-      let hllk='',response,title='',lastError;
-      for(let attempt=1;attempt<=2&&!hllk;attempt++){
-        try{
-          response=await page.goto(row.editUrl,{waitUntil:'domcontentloaded',referer:verificationListUrl(),timeout:60000});
-          hllk=await page.locator('input[name="hllk"]').first().inputValue({timeout:5000}).catch(()=>''),title=clean(await page.title().catch(()=>''));
-          if(!/^[0-9]+$/.test(hllk))hllk='';
-        }catch(error){lastError=error;if(attempt<2)await page.waitForTimeout(1000);}
-      }
-      if(hllk)extracted.push({target:{hllk,date:row.date,summary:row.summary,editUrl:row.editUrl,activities:row.activities,valid:true,issues:[]}});
-      else{const formNames=await page.locator('input[name],select[name],textarea[name]').evaluateAll(nodes=>nodes.map(node=>node.name)).catch(()=>[]),errorDetail=lastError?`${/timeout/i.test(lastError.message)?'Timeout setelah 2 percobaan':'Fetch halaman edit gagal'}: ${lastError.message}`:`ID hllk tidak ditemukan; HTTP ${response?.status()||'tanpa respons'}, halaman "${title||'tanpa judul'}", URL akhir ${page.url()}, field: ${[...new Set(formNames)].slice(0,12).join(', ')||'tidak ada'}`;extracted.push({failure:{...row,valid:false,issues:[`${errorDetail} (${Date.now()-started} ms)`]}});}
-    }
-    const targets=extracted.map(item=>item.target).filter(Boolean),idFailures=extracted.map(item=>item.failure).filter(Boolean);
-    const uniqueTargets=[...new Map(targets.map(item=>[item.hllk,item])).values()];
-    uniqueTargets.pagesScanned=visited.size;uniqueTargets.rowsFound=uniqueRows.length;uniqueTargets.validCount=uniqueTargets.length;uniqueTargets.invalidCount=invalidRows.length+idFailures.length;uniqueTargets.invalidTargets=[...invalidRows,...idFailures];
-    progress(id,'complete',`Pemindaian selesai: ${uniqueTargets.length} target siap, ${uniqueTargets.invalidCount} ditahan.`,{validCount:uniqueTargets.length,invalidCount:uniqueTargets.invalidCount,pagesScanned:visited.size});
-    return uniqueTargets;
-  } catch(error){
-    const message=verificationErrorMessage(error);
-    if(message!==clean(error?.message||error))throw new HttpError(409,message);
-    progress(id,'error',`Pemindaian gagal: ${message}`);
-    throw error;
-  }
-}
 
 const verificationListUrl=()=>`${LLK_BASE}/verifikasi?start_date=&end_date=&status=1&by=nip&q=`;
 async function runAutomaticVerification(id,input) {
@@ -776,29 +388,8 @@ async function runAutomaticVerification(id,input) {
   const selected=new Set(Array.isArray(input.hllk)?input.hllk.map(String):[]),targets=selected.size?stage.targets.filter(item=>selected.has(item.hllk)):stage.targets;
   if(!targets.length)bad('Tidak ada LLK berstatus Belum Diverifikasi');
   clearTimeout(stage.timer);
-  const results=[];
   try {
-    for(const [index,target] of targets.entries()){
-      progress(id,'verify-target',`Memverifikasi ${index+1}/${targets.length} dari hasil filter yang sama…`,{target:index+1,totalTargets:targets.length,hllk:target.hllk,date:target.date});
-      let page;
-      try {
-        page=await stage.context.newPage();
-        await page.goto(target.editUrl,{waitUntil:'domcontentloaded',referer:stage.filter.url,timeout:60000});
-        const form=page.locator('form[action*="/verifikasi/update"]').first();
-        if(!await form.count())throw new Error('Form verifikasi tidak ditemukan pada LLK target');
-        if(await form.locator('[name="hllk"]').inputValue()!==String(target.hllk))throw new Error('Identitas LLK pada form tidak sesuai target');
-        await form.evaluate((node,note)=>{const set=(name,value)=>{const fields=[...node.querySelectorAll(`[name="${name}"]`)];if(!fields.length)throw new Error(`Kolom ${name} tidak ditemukan`);for(const field of fields){if(field.type==='radio'||field.type==='checkbox')field.checked=field.value===value;else field.value=value;field.dispatchEvent(new Event('input',{bubbles:true}));field.dispatchEvent(new Event('change',{bubbles:true}));}};set('note',note);set('verified','2');if(!node.checkValidity())throw new Error('Form verifikasi tidak valid');},message);
-        const [response]=await Promise.all([page.waitForNavigation({waitUntil:'domcontentloaded',timeout:60000}),form.evaluate(node=>node.requestSubmit())]);
-        if(!response?.ok())throw new Error(`Pengiriman verifikasi gagal: HTTP ${response?.status()||0}. Pindai ulang untuk memastikan status sebelum mencoba lagi.`);
-        if(!llkLocation(page.url()).authenticated)throw new Error('Sesi LLK kedaluwarsa saat mengirim verifikasi');
-        const confirmation=await page.goto(target.editUrl,{waitUntil:'domcontentloaded',referer:stage.filter.url,timeout:60000});
-        if(!confirmation?.ok()||!llkLocation(page.url()).authenticated)throw new Error('Status hasil kirim belum dapat dipastikan. Pindai ulang sebelum mencoba lagi.');
-        const persisted=await page.evaluate(()=>{const form=document.querySelector('form[action*="/verifikasi/update"]');return {hllk:form?.querySelector('[name="hllk"]')?.value,verified:form?.querySelector('select[name="verified"],input[name="verified"]:checked,input[type="hidden"][name="verified"]')?.value};});
-        if(persisted.hllk!==String(target.hllk)||persisted.verified!=='2')throw new Error('Status Terverifikasi belum terbukti tersimpan di LLK. Pindai ulang sebelum mencoba lagi.');
-        results.push({hllk:target.hllk,date:target.date,status:200,success:true,url:page.url()});
-      } catch(error) { results.push({hllk:target.hllk,date:target.date,status:0,success:false,error:verificationErrorMessage(error)}); }
-      finally { await page?.close().catch(()=>{}); }
-    }
+    const results=await verifyBatch(await employeeClient(id),targets,message,{progress:(stage,message,detail)=>progress(id,stage,message,detail)});
     await audit('verification.auto',id,{message,targetIds:targets.map(item=>item.hllk),filter:stage.filter},{counts:{total:results.length,success:results.filter(item=>item.success).length},result:'completed'});
     return {total:results.length,success:results.filter(item=>item.success).length,failed:results.filter(item=>!item.success).length,results,filter:stage.filter};
   } finally { closeVerificationStage(id); }
@@ -820,40 +411,39 @@ async function api(req,res,url) {
   if(req.method==='GET'&&path==='/api/employees')return json(res,200,await getEmployees());
   if(req.method==='GET'&&path==='/api/templates')return json(res,200,await templateSnapshot());
   if(req.method==='POST'&&path==='/api/verification/run'){const input=await bodyJson(req),id=safeId(input.employeeId);return json(res,200,await withLock(id,()=>runAutomaticVerification(id,input)));}
-  if(req.method==='GET'&&path==='/api/verification/preview'){const id=safeId(url.searchParams.get('employeeId'));return json(res,200,await withLock(id,async()=>{const {context}=await launchEmployee(id,true);try{const targets=await verificationTargets(id,context),stage=stageVerification(id,context,targets,{status:'1',by:'nip',url:verificationListUrl(),pagesScanned:targets.pagesScanned||1,rowsFound:targets.rowsFound??targets.length});return {stageToken:stage.token,targets,total:targets.length,pagesScanned:targets.pagesScanned||1,rowsFound:targets.rowsFound??targets.length,validCount:targets.validCount??targets.length,invalidCount:targets.invalidCount||0,invalidTargets:targets.invalidTargets||[],filter:stage.filter};}catch(error){await context.close().catch(()=>{});throw error;}}));}
+  if(req.method==='GET'&&path==='/api/verification/preview'){const id=safeId(url.searchParams.get('employeeId'));return json(res,200,await withLock(id,async()=>{const targets=await scanVerification(await employeeClient(id),{progress:(stage,message,detail)=>progress(id,stage,message,detail)}),stage=stageVerification(id,targets,{status:'1',by:'nip',url:verificationListUrl(),pagesScanned:targets.pagesScanned,rowsFound:targets.rowsFound});return {stageToken:stage.token,targets,total:targets.length,pagesScanned:targets.pagesScanned,rowsFound:targets.rowsFound,validCount:targets.validCount,invalidCount:targets.invalidCount,invalidTargets:targets.invalidTargets,filter:stage.filter};}));}
   if(req.method==='POST'&&path==='/api/bootstrap/login'){
     const input=await bodyJson(req);
-    const supervisorNip=input.supervisorNip;
-    if(typeof supervisorNip!=='string'||!/^\d{18}$/.test(supervisorNip))bad('NIP atasan wajib tepat 18 digit');
+    if(typeof input.supervisorNip!=='string'||!/^\d{18}$/.test(input.supervisorNip))bad('NIP atasan wajib tepat 18 digit');
+    if(typeof input.username!=='string'||!input.username.trim()||input.username.length>200||typeof input.password!=='string'||!input.password||input.password.length>2000)bad('Nama pengguna dan password SSO wajib diisi.');
     if(sessionBusy||locks.size||sessionEmployee||loginFlows.size)throw new HttpError(409,'Akhiri sesi sebelumnya sebelum login kembali.');
     sessionBusy=true;
-    let tempId;
     try{
-      const launched=await launchExternalBootstrap(input.satker,supervisorNip,input.department);
-      tempId=launched.tempId;
-      const {employee,context}=launched,flow={employee,context,createdAt:new Date().toISOString(),expiresAt:null,closing:false};
+      const {employee,auth,tempId}=await launchBuiltInBootstrap(input);
+      const flow={employee,auth,createdAt:new Date().toISOString(),closing:false};
+      flow.timer=setTimeout(()=>void closeLoginFlow(tempId),10*60_000);flow.timer.unref();
       loginFlows.set(tempId,flow);
-      context.on('close',()=>{flow.closed=true;if(loginFlows.get(tempId)===flow&&!flow.completed&&!flow.completing)loginFlows.delete(tempId);});
-      const page=await context.newPage();
-      await page.goto(LLK_BASE,{waitUntil:'domcontentloaded'});
-      return json(res,200,{tempId,message:'Browser login dibuka. Silakan login akun LLK Anda.'});
-    }catch(error){if(tempId)await closeLoginFlow(tempId);throw error;}finally{sessionBusy=false;}
+      return json(res,200,{tempId,...auth.state});
+    }finally{input.password='';sessionBusy=false;}
   }
-  if(req.method==='GET'&&path==='/api/bootstrap/status'){
-    const active=[...loginFlows.entries()].filter(([,flow])=>!flow.completed&&!flow.closing&&!flow.closed).map(([tempId,flow])=>({tempId,authenticated:Boolean(authenticatedLlkPage(flow.context)),createdAt:flow.createdAt,expiresAt:flow.expiresAt}));
-    return json(res,200,{active});
-  }
-  if(req.method==='POST'&&path==='/api/bootstrap/complete'){
-    const input=await bodyJson(req),tempId=safeId(input.tempId);
-    const flow=loginFlows.get(tempId);
-    if(!flow||flow.closing)throw new HttpError(401,'Sesi login tidak ditemukan. Mulai login SSO kembali.');
-    if(flow.completed)return json(res,200,flow.result);
-    if(flow.completing)return json(res,200,await flow.completing);
-    if(flow.closed)throw new HttpError(401,'Jendela login ditutup. Mulai login SSO kembali.');
+  if(req.method==='POST'&&path==='/api/bootstrap/authenticator'){
+    const input=await bodyJson(req),tempId=safeId(input.tempId),flow=loginFlows.get(tempId);
+    if(!flow||flow.closing)throw new HttpError(401,'Sesi login berakhir. Login kembali.');
+    if(typeof input.code!=='string'||!/^\d{6,8}$/.test(input.code))bad('Kode authenticator harus 6–8 digit.');
     if(sessionBusy||locks.size)throw new HttpError(409,'Operasi sesi sedang berjalan');
     sessionBusy=true;
-    flow.completing=completeExternalBootstrap(tempId,flow.employee,flow.context);
-    try{return json(res,200,await flow.completing);}finally{flow.completing=null;sessionBusy=false;if(flow.closed&&!flow.completed)loginFlows.delete(tempId);}
+    try{return json(res,200,{tempId,...await flow.auth.verify(input.code)});}
+    finally{input.code='';sessionBusy=false;}
+  }
+  if(req.method==='POST'&&path==='/api/bootstrap/complete'){
+    const input=await bodyJson(req),tempId=safeId(input.tempId),flow=loginFlows.get(tempId);
+    if(!flow||flow.closing)throw new HttpError(401,'Sesi login tidak ditemukan. Mulai login SSO kembali.');
+    if(flow.completed)return json(res,200,flow.result);
+    if(flow.auth.state.stage!=='authenticated')throw new HttpError(409,'Selesaikan kode authenticator terlebih dahulu.');
+    if(sessionBusy||locks.size)throw new HttpError(409,'Operasi sesi sedang berjalan');
+    sessionBusy=true;
+    try{return json(res,200,await completeBootstrap(tempId,flow));
+    }finally{sessionBusy=false;}
   }
   const employeeRoute = path.match(/^\/api\/employees\/([^/]+)\/(.+)$/);
   if (!employeeRoute) return json(res,404,{error:'Endpoint tidak ditemukan'});
@@ -863,46 +453,29 @@ async function api(req,res,url) {
   if (action === 'calendar-entries' && req.method === 'GET') return json(res, 200, await withLock(id, async () => {
     if (url.searchParams.get('refresh') !== '1' && calendarEntries.has(id)) return calendarEntries.get(id);
     calendarEntries.delete(id);
-    const { context } = await launchEmployee(id);
-    try {
-      await scrapeEntries(context, undefined, id);
-      storeSessionCookies(id, await context.cookies());
-      return calendarEntries.get(id);
-    } finally { await context.close(); }
+    await scrapeEntries(await employeeClient(id),id);
+    return calendarEntries.get(id);
   }));
   if (action === 'preview' && req.method === 'POST') {
     const input = await bodyJson(req);
     return json(res, 200, await withLock(id, async () => {
-      const employee = await findEmployee(id), { context } = await launchEmployee(id);
-      try {
-        const source = input.source === 'general' ? 'general' : 'page';
-        progress(id, 'preview-start', `Menyiapkan isian ${input.start} sampai ${input.end}…`);
-        const page = context.pages()[0] ?? await context.newPage();
-        progress(id, 'preview-llk', 'Membaca pola jadwal dan kegiatan LLK sebelumnya…');
-        const entries = await scrapeEntries(context, page);
+      const employee=await findEmployee(id),client=await employeeClient(id);
+        const source=input.source==='general'?'general':'page';
+        progress(id,'preview-start',`Menyiapkan isian ${input.start} sampai ${input.end}…`);
+        const entries=await readEntries(client,{scope:'last'});
         const pageActivities = source === 'page'
           ? [...new Map(entries.filter(entry => !entry.isBreak).map(item => [canonical({ description: item.description, type: item.type }), item])).values()]
           : [];
         progress(id, 'preview-llk-done', `LLK sebelumnya terbaca: ${entries.length} baris.`);
         return generatePreview(employee, input.start, input.end, source, input.department, pageActivities, entries);
-      } finally {
-        await context.close();
-      }
     }));
   }
   if (action === 'personal-template/apply' && req.method === 'POST') { const input=await bodyJson(req); return json(res,200,await withLock(id,()=>applyPersonal(id,input))); }
   if (action === 'personal-template' && req.method === 'DELETE') { const input=await bodyJson(req); return json(res,200,await withLock(id,()=>resetPersonal(id,input))); }
   if (action === 'personal-template/import' && req.method === 'POST') return json(res, 200, await withLock(id, () => importPersonal(id)));
   if (action === 'session/status' && req.method === 'GET') return json(res,200,await withLock(id,async()=>{
-    const { context } = await launchEmployee(id, true);
-    try {
-      const page = context.pages()[0] ?? await context.newPage();
-      const response = await page.goto(LLK_BASE, { waitUntil: 'domcontentloaded', timeout: 30000 });
-      if (!response?.ok()) throw new HttpError(502, 'Status sesi belum dapat diperiksa. Coba periksa lagi.');
-      return { authenticated: llkLocation(page.url()).authenticated, source: 'runtime-session' };
-    } finally {
-      await context.close();
-    }
+    const profile=await readProfile(await employeeClient(id));
+    return {authenticated:profile.nip===id,source:'http-session'};
   }));
   if (action === 'submit' && req.method === 'POST') {
     const input = await bodyJson(req);
@@ -920,6 +493,10 @@ const server = createServer((req, res) => {
   void (async () => {
     try {
       const url = new URL(req.url, `http://${req.headers.host || '127.0.0.1'}`);
+      res.setHeader('Cache-Control','no-store');
+      const expectedHost=`127.0.0.1:${PORT}`;
+      if(req.headers.host!==expectedHost)throw new HttpError(403,'Host aplikasi lokal tidak valid. Gunakan 127.0.0.1.');
+      if(req.method==='POST'&&(req.headers.origin!==`http://${expectedHost}`||!/^application\/json(?:;|$)/i.test(req.headers['content-type']||'')))throw new HttpError(403,'Permintaan harus berasal dari aplikasi lokal.');
       if (url.pathname.startsWith('/api/')) return await api(req, res, url);
       let decoded;
       try { decoded = decodeURIComponent(url.pathname); } catch { bad('Path tidak valid'); }

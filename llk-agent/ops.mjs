@@ -2,7 +2,6 @@ import { constants, existsSync } from 'node:fs';
 import { access, copyFile, mkdir, readdir, rm, stat } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { basename, join, resolve } from 'node:path';
-import { browserExecutable } from './browser.mjs';
 
 const root = import.meta.dirname;
 const port = Number(process.env.PORT || 4545);
@@ -22,17 +21,14 @@ async function portIsFree() {
 
 async function preflight() {
   if (!Number.isInteger(port) || port < 1 || port > 65535) return fail(`PORT harus berupa angka 1-65535; nilai saat ini: ${process.env.PORT ?? '4545'}`);
-  if (Number(process.versions.node.split('.')[0]) < 20) return fail(`Node.js 20 atau lebih baru diperlukan; versi saat ini ${process.version}.`);
-  const browser = browserExecutable();
-  if (!browser) return fail('Browser Chromium tidak ditemukan. Instal Microsoft Edge, Google Chrome, atau Chromium; atau atur LLK_BROWSER_PATH ke file executable browser.');
-  if (!existsSync(join(root, 'node_modules', 'playwright-core'))) return fail('Dependensi belum diinstal. Jalankan npm install dari folder aplikasi.');
+  const [major,minor]=process.versions.node.split('.').map(Number);
+  if (major<20||(major===20&&minor<19)) return fail(`Node.js 20.19 atau lebih baru diperlukan; versi saat ini ${process.version}.`);
+  if (!existsSync(join(root, 'node_modules', 'cheerio'))) return fail('Dependensi belum diinstal. Jalankan npm install dari folder aplikasi.');
   for (const dir of ['public', 'data']) {
     try { await access(join(root, dir), constants.R_OK); } catch { return fail(`Folder wajib tidak dapat dibaca: ${join(root, dir)}`); }
   }
-  try { await mkdir(join(root, 'profiles'), { recursive: true }); await access(join(root, 'profiles'), constants.R_OK | constants.W_OK); }
-  catch { return fail(`Folder profil tidak dapat ditulis: ${join(root, 'profiles')}`); }
   if (!(await portIsFree())) return fail(`Port ${port} sedang digunakan. Tutup aplikasi yang memakainya atau jalankan dengan PORT lain.`);
-  console.log(`Pemeriksaan siap: Node ${process.version}, browser ${browser}, port ${port} bebas.`);
+  console.log(`Pemeriksaan siap: Node ${process.version}, HTTP tanpa Chromium, port ${port} bebas.`);
 }
 
 async function backup() {

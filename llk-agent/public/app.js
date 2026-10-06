@@ -1,7 +1,6 @@
 let templates = {}, active = null, currentPreview = null, currentReport = null, personalStage = null, verificationStageToken = null, busy = false;
 let bootstrapFlow = null, onboardingState = 'checking', sessionPollGeneration = 0;
 let verificationTargets = [];
-let sessionPollTimer = null;
 let changingDates = false;
 let previewSource = null;
 const editDayState = new Set();
@@ -9,6 +8,8 @@ let calendarDays = new Map();
 let calendarEntries = null;
 let calendarMonth = new Date(2026, new Date().getMonth(), 1);
 let calendarSelection = { start: null, end: null };
+let unfilledDates=null;
+let heldVerification=[];
 const isoDate = date => [date.getFullYear(), String(date.getMonth() + 1).padStart(2, '0'), String(date.getDate()).padStart(2, '0')].join('-');
 const parseIsoDate = value => { const [year,month,day]=String(value||'').split('-').map(Number); return year ? new Date(year,month-1,day) : null; };
 const formatIndonesianDate = value => value ? new Intl.DateTimeFormat('id-ID',{weekday:'short',day:'numeric',month:'short',year:'numeric'}).format(parseIsoDate(value)) : 'Belum dipilih';
@@ -76,15 +77,17 @@ function syncControls() {
   if (applyPersonalTemplateBtn) applyPersonalTemplateBtn.disabled = busy || !personalStage || !$('#personalStageConfirm')?.checked;
   if ($('#runWizardVerificationBtn')) $('#runWizardVerificationBtn').disabled = busy || !verificationTargets.length || !verificationStageToken;
   $('#refreshCalendarEntriesBtn').disabled = busy || !active || Boolean(calendarEntries?.loading);
+  $('#selectUnfilledDaysBtn').disabled=busy||!active||!calendarEntries?.available||!calendarEntries.complete||calendarEntries.loading||Boolean(calendarEntries.error)||$('#selectUnfilledDaysBtn').dataset.empty==='true';
   $('#calendarPrevBtn').disabled = busy || calendarMonth.getMonth() === 0;
   $('#calendarNextBtn').disabled = busy || calendarMonth.getMonth() === 11;
   document.querySelectorAll('[data-calendar-date]').forEach(control => {
     const date = parseIsoDate(control.dataset.calendarDate);
     control.disabled = busy || control.dataset.calendarDate > isoDate(new Date()) || [0, 6].includes(date.getDay()) || calendarDays.has(control.dataset.calendarDate);
   });
-  const onboardingLocked = busy || ['checking', 'waiting', 'completing', 'error'].includes(onboardingState);
-  $('#quickSupervisorNip').disabled = onboardingLocked;
-  $('#quickSsoLoginBtn').disabled = onboardingLocked;
+  const onboardingLocked = busy || onboardingState !== 'idle';
+  for (const selector of ['#quickSupervisorNip','#ssoUsername','#ssoPassword','#quickSatker','#quickSupervisorChoice']) $(selector).disabled = onboardingLocked;
+  $('#ssoCode').disabled = busy || onboardingState !== 'authenticator';
+  $('#quickSsoLoginBtn').disabled = busy || !['idle','authenticator'].includes(onboardingState);
   $('#quickSsoRetryBtn').disabled = busy || onboardingState !== 'error';
 }
 
@@ -124,6 +127,8 @@ async function pollOperationProgress(employeeId,signal){
         since = Math.max(since, event.sequence || 0);
         const message = `${event.message}${event.page ? ` (halaman ${event.page})` : ''}${event.rowsFound != null ? ` · ${event.rowsFound} target` : ''}${event.validCount != null ? ` · ${event.validCount} siap` : ''}${event.invalidCount ? ` · ${event.invalidCount} ditahan` : ''}`;
         log(message, event.status || 'Info');
+        if(!signal.aborted&&event.stage==='verify-target')$('#wizardVerificationCount').textContent=`Mengirim ${event.target} dari ${event.totalTargets}… Hasil belum dikonfirmasi.`;
+        else if(!signal.aborted&&event.stage==='verify-confirm')$('#wizardVerificationCount').textContent='Memastikan status dan pesan tersimpan…';
         $('#operationStatus').textContent = $('#logLatest').textContent;
       }
     }catch{}
@@ -142,7 +147,7 @@ async function runBusy(action, operationName = 'Operasi') {
   const polling=pollOperationProgress(active?.id,controller.signal);
   try {
     const result = await action();
-    if (onboardingState !== 'error') log(operationName === 'Login SSO' ? 'Jendela SSO dibuka. Login belum dikonfirmasi; selesaikan login di browser.' : `${operationName}: proses selesai. Periksa rincian hasil.`, operationName === 'Login SSO' ? 'Info' : 'Selesai');
+    if (onboardingState !== 'error') log(`${operationName}: proses selesai. Periksa rincian hasil.`, 'Info');
     return result;
   } catch (error) {
     const msg = `${operationName} gagal: ${error.message}`;
@@ -461,6 +466,7 @@ function statusOf(row) {
 
 function verificationOutcome(item) {
   if (item.success === true) return 'success';
+  if (item.notAttempted || Number(item.status) >= 400 && Number(item.status) < 500) return 'failed';
   // Only explicit pre-submit checks prove that verification was not sent.
   return /Form verifikasi (?:tidak ditemukan|tidak valid)|Identitas LLK pada form tidak sesuai target|Kolom .+ tidak ditemukan/i.test(String(item.error || '')) ? 'failed' : 'uncertain';
 }
@@ -581,10 +587,11 @@ async function loadCalendarEntries(refresh = false) {
   try {
     const result = await api(`/api/employees/${encodeURIComponent(employee.id)}/calendar-entries${refresh ? '?refresh=1' : ''}`);
     if (active !== employee || calendarEntries !== state) return;
-    if (result.scope !== 'page-1' || typeof result.available !== 'boolean' || !Array.isArray(result.dates)
+    if (result.scope !== 'all-pages' || result.complete !== true || typeof result.available !== 'boolean' || !Array.isArray(result.dates)
       || result.dates.some(date => typeof date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(date))
       || !Number.isFinite(Date.parse(result.fetchedAt))) throw new Error('Respons isian LLK tidak lengkap.');
     state.available = result.available;
+    state.complete=result.complete;state.pagesScanned=result.pagesScanned;
     state.dates = new Set(result.available ? result.dates : []);
     state.fetchedAt = result.fetchedAt;
     state.warning = typeof result.warning === 'string' ? result.warning : '';
@@ -607,6 +614,7 @@ function updateCalendarSelection(start, end = start) {
     setWizardStep(2);
   }
   calendarSelection = { start, end };
+  unfilledDates=null;
   const startInput = $('#startDate'), endInput = $('#endDate');
   if (startInput) startInput.value = start || '';
   if (endInput) endInput.value = end || '';
@@ -620,18 +628,28 @@ function renderCalendar() {
   const grid = $('#calendarGrid');
   if (!grid) return;
   const entries = calendarEntries;
-  const unmarkedStatus = entries?.available ? 'Tidak terlihat di halaman 1' : 'Belum diperiksa';
+  const unmarkedStatus = entries?.available && entries.complete && !entries.error && !entries.loading ? 'Belum terisi menurut pemindaian lengkap' : 'Belum dipastikan';
   $('#calendarUnmarkedStatus').textContent = unmarkedStatus;
   const fetched = entries?.fetchedAt ? new Intl.DateTimeFormat('id-ID', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(entries.fetchedAt)) : '';
   $('#calendarEntriesStatus').textContent = [
-    entries?.loading ? 'Membaca isian LLK halaman 1…' : entries?.error || (entries?.available ? `${entries.dates.size} tanggal terlihat di halaman 1.` : 'Belum diperiksa. Data isian LLK belum tersedia.'),
+    entries?.loading ? 'Membaca seluruh halaman LLK…' : entries?.error || (entries?.available ? `${entries.dates.size} tanggal terisi ditemukan dari ${entries.pagesScanned} halaman.` : 'Belum diperiksa. Data isian LLK belum tersedia.'),
     fetched ? `${entries?.available ? (entries.loading || entries.error ? 'Hasil pembacaan sebelumnya' : 'Hasil pembacaan') : 'Pemeriksaan terakhir'}: ${fetched}.` : '',
     entries?.warning || '',
   ].filter(Boolean).join(' ');
   $('#calendarEntriesStatus').classList.toggle('is-error', Boolean(entries?.error || (!entries?.loading && entries?.warning)));
-  $('#refreshCalendarEntriesBtn').textContent = entries?.loading ? 'Membaca halaman 1…' : 'Perbarui isian LLK';
+  $('#refreshCalendarEntriesBtn').textContent = entries?.loading ? 'Memindai semua halaman…' : 'Perbarui isian LLK';
   $('#refreshCalendarEntriesBtn').disabled = busy || !active || Boolean(entries?.loading);
   const year = calendarMonth.getFullYear(), month = calendarMonth.getMonth();
+  const eligible=[];
+  for(let day=1;day<=new Date(year,month+1,0).getDate();day++){
+    const date=new Date(year,month,day),iso=isoDate(date);
+    if(iso<=isoDate(new Date())&&![0,6].includes(date.getDay())&&!calendarDays.has(iso))eligible.push(iso);
+  }
+  const complete=entries?.available&&entries.complete&&!entries.loading&&!entries.error;
+  const filled=complete?eligible.filter(date=>entries.dates.has(date)).length:0;
+  $('#calendarMonthSummary').textContent=complete?`${filled} hari kerja terisi · ${eligible.length-filled} belum terisi (sampai hari ini)`:'Status bulan belum lengkap. Perbarui isian LLK sebelum memilih tanggal kosong.';
+  $('#selectUnfilledDaysBtn').disabled=busy||!complete||filled===eligible.length;
+  $('#selectUnfilledDaysBtn').dataset.empty=String(filled===eligible.length);
   $('#calendarMonthTitle').textContent = new Intl.DateTimeFormat('id-ID',{month:'long',year:'numeric'}).format(calendarMonth);
   const firstWeekday = (new Date(year,month,1).getDay()+6)%7;
   const lastDay = new Date(year,month+1,0).getDate();
@@ -649,11 +667,11 @@ function renderCalendar() {
     const date = new Date(year,month,day), iso = isoDate(date), weekday = date.getDay();
     const official = calendarDays.get(iso), weekend = weekday===0 || weekday===6;
     const disabled = busy || iso > today || weekend || Boolean(official);
-    const selected = calendarSelection.start && iso>=calendarSelection.start && iso<=(calendarSelection.end||calendarSelection.start);
+    const selected = unfilledDates?unfilledDates.has(iso):calendarSelection.start && iso>=calendarSelection.start && iso<=(calendarSelection.end||calendarSelection.start);
     const type = official?.type || (weekend ? 'weekend' : 'workday');
     const title = official?.label || (weekend ? (weekday===6?'Sabtu':'Minggu') : 'Hari kerja');
     const occupied = entries?.available && entries.dates.has(iso);
-    const occupancy = occupied ? 'Terisi di halaman 1' : unmarkedStatus;
+    const occupancy = occupied ? 'Terisi di LLK' : unmarkedStatus;
     const label = `${formatIndonesianDate(iso)}, ${title}, ${occupancy}${selected ? ', dipilih' : ''}`;
     cells.push(`<button type="button" class="calendar-day is-${type}${occupied?' is-occupied':''}${selected?' is-selected':''}${iso===calendarSelection.start?' is-start':''}${iso===calendarSelection.end?' is-end':''}" data-calendar-date="${iso}" ${disabled?'disabled':''} aria-label="${escapeHtml(label)}" title="${escapeHtml(label)}"><strong>${day}</strong>${official?`<small>${official.type==='collective'?'Cuti':'Libur'}</small>`:weekend?'<small>Libur</small>':''}${occupied?'<small class="calendar-entry-marker">Terisi</small>':''}</button>`);
   }
@@ -688,6 +706,18 @@ $('#changeDatesBtn')?.addEventListener('click', () => {
   $('#previewBtn').focus({ preventScroll: true });
 });
 
+$('#selectUnfilledDaysBtn').addEventListener('click',()=>{
+ if(busy||!calendarEntries?.complete||calendarEntries.loading||calendarEntries.error)return;
+ const dates=[];
+ for(let day=1;day<=new Date(2026,calendarMonth.getMonth()+1,0).getDate();day++){
+  const date=new Date(2026,calendarMonth.getMonth(),day),iso=isoDate(date);
+  if(iso<=isoDate(new Date())&&![0,6].includes(date.getDay())&&!calendarDays.has(iso)&&!calendarEntries.dates.has(iso))dates.push(iso);
+ }
+ if(!dates.length)return;
+ currentPreview=null;currentReport=null;editDayState.clear();$('#confirmCheck').checked=false;
+ updateCalendarSelection(dates[0],dates.at(-1));unfilledDates=new Set(dates);renderCalendar();
+ $('#calendarSummary').textContent=`${dates.length} hari kerja belum terisi dipilih. Tanggal terisi tidak disertakan; periksa pratinjau sebelum kirim.`;
+});
 $('#calendarGrid')?.addEventListener('click', event => {
   const button = event.target.closest('[data-calendar-date]');
   if (!button) return;
@@ -742,6 +772,7 @@ async function refreshWizardVerification() {
     if (count) count.textContent = `${result.validCount ?? verificationTargets.length} LLK siap diverifikasi · filter Belum Terverifikasi berdasarkan NIP terbukti aktif`;
     const preview = $('#wizardVerificationPreview');
     const held = Array.isArray(result.invalidTargets) ? result.invalidTargets : [];
+    heldVerification=held;
     if (preview) preview.innerHTML = `<section class="verification-command"><div class="verification-filter verification-filter--active"><span>Filter aktif</span><strong>Belum Terverifikasi</strong><span>berdasarkan NIP</span></div>${verificationTargets.length ? `<div class="verification-summary"><strong>${verificationTargets.length}</strong><span>LLK siap diverifikasi</span></div>${verificationList(verificationTargets)}` : `<p class="verification-empty">${held.length ? 'Belum ada LLK siap diverifikasi. Periksa daftar ditahan.' : 'Tidak ada LLK anggota berstatus Belum Terverifikasi.'}</p>`}${held.length ? `<div class="verification-held"><strong>${held.length} LLK ditahan</strong><span>Belum lolos pemeriksaan sebelum verifikasi.</span></div>${verificationList(held)}` : ''}</section>`;
     $('#runWizardVerificationBtn').disabled = !verificationTargets.length;
     $('#runWizardVerificationBtn').hidden = !verificationTargets.length;
@@ -786,33 +817,36 @@ $('#runWizardVerificationBtn')?.addEventListener('click', () => active && runBus
   log(`Verifikasi anggota: ${summary}.`);
   feedback(`${summary}. Periksa rincian hasil.`, Boolean(counts.failed || counts.uncertain));
   $('#wizardVerificationCount').textContent = summary;
-  $('#wizardVerificationPreview').innerHTML = `<p class="verification-result-summary"><strong>${summary}</strong><br>Pindai ulang untuk memeriksa status terbaru sebelum mencoba lagi. Tidak ada pengiriman ulang otomatis.</p>${verificationList(rows, 'result')}`;
+  $('#wizardVerificationPreview').innerHTML = `<p class="verification-result-summary"><strong>${summary} · ${heldVerification.length} ditahan</strong><br>Periksa LLK yang tersisa. Jangan kirim ulang hasil belum pasti sebelum status diperiksa.</p>${['uncertain','failed','success'].map(outcome=>{const items=rows.filter(row=>verificationOutcome(row)===outcome);if(!items.length)return '';const title={uncertain:'Belum pasti · periksa status sebelum mencoba lagi',failed:'Gagal · periksa alasan sebelum mencoba lagi',success:'Berhasil · status dan pesan terkonfirmasi'}[outcome];return outcome==='success'?`<details><summary>${title} (${items.length})</summary>${verificationList(items,'result')}</details>`:`<section><h3>${title} (${items.length})</h3>${verificationList(items,'result')}</section>`;}).join('')}${heldVerification.length?`<section><h3>Ditahan (${heldVerification.length})</h3>${verificationList(heldVerification)}</section>`:''}`;
   $('#runWizardVerificationBtn').disabled=true;
   $('#wizardVerificationMessage').closest('.form-group').hidden = true;
   $('#runWizardVerificationBtn').hidden = true;
-  $('#refreshWizardVerificationBtn').textContent = 'Periksa sisa LLK';
+  $('#refreshWizardVerificationBtn').textContent = 'Periksa LLK yang tersisa';
   $('#refreshWizardVerificationBtn').classList.add('btn-primary');
   $('#refreshWizardVerificationBtn').classList.remove('btn-outline');
 }, 'Verifikasi LLK Anggota'));
 function renderOnboarding() {
   $('#employeeForm').hidden = Boolean(active);
+  renderSupervisorInput();
   $('#workspace').hidden = !active;
   $('#endSessionBtn').hidden = !active && !bootstrapFlow && onboardingState !== 'error';
-  $('#quickSsoLoginBtn').hidden = onboardingState !== 'idle';
+  const mfa = onboardingState === 'authenticator';
+  $('#ssoCredentials').hidden = mfa || onboardingState === 'completing';
+  $('#ssoAuthenticator').hidden = !mfa;
+  $('#ssoCode').required = mfa;
+  $('#quickSsoLoginBtn').hidden = !['idle','authenticator'].includes(onboardingState);
+  $('#quickSsoLoginBtn').textContent = mfa ? 'Verifikasi kode authenticator' : 'Login SSO';
   $('#quickSsoRetryBtn').hidden = onboardingState !== 'error';
-  $('#onboardingStatus').textContent = onboardingState === 'waiting'
-    ? 'Selesaikan login SSO di Edge. Data LLK dibaca setelah login.'
+  $('#onboardingStatus').textContent = mfa ? 'SSO meminta kode authenticator. Masukkan kode terbaru untuk melanjutkan.'
     : onboardingState === 'completing' ? 'Membaca identitas, atasan langsung, dan kegiatan LLK…'
     : onboardingState === 'checking' ? 'Memeriksa sesi…'
-    : onboardingState === 'error' ? 'Pemeriksaan berhenti. Coba lagi atau akhiri sesi untuk login ulang.'
-    : 'Setelah login, nama pemeriksa akan ditampilkan untuk Anda periksa.';
-  if (!active) $('#loginBadge').textContent = onboardingState === 'waiting' ? 'Menunggu SSO' : onboardingState === 'completing' ? 'Memverifikasi' : 'Belum masuk';
+    : onboardingState === 'error' ? 'Login berhenti. Coba lagi atau akhiri sesi untuk login ulang.'
+    : 'Login dilakukan di aplikasi ini. Nama pemeriksa ditampilkan setelah sesi terverifikasi.';
+  if (!active) $('#loginBadge').textContent = mfa ? 'Menunggu kode' : onboardingState === 'completing' ? 'Memverifikasi' : 'Belum masuk';
   syncControls();
 }
 
 function stopSessionPolling() {
-  clearTimeout(sessionPollTimer);
-  sessionPollTimer = null;
   sessionPollGeneration++;
 }
 
@@ -830,7 +864,7 @@ async function fetchBootstrapProfile() {
   stopSessionPolling();
   onboardingState = 'completing';
   renderOnboarding();
-  await runBusy(async () => {
+  const complete = async () => {
     try {
       const out = await api('/api/bootstrap/complete', {
         method: 'POST', body: JSON.stringify({ tempId: bootstrapFlow })
@@ -842,7 +876,9 @@ async function fetchBootstrapProfile() {
     } catch (error) {
       failOnboarding(error);
     }
-  }, 'Membaca data LLK');
+  };
+  if (busy) await complete();
+  else await runBusy(complete, 'Membaca data LLK');
 }
 
 async function resumeSession() {
@@ -852,46 +888,61 @@ async function resumeSession() {
   if (generation !== sessionPollGeneration) return;
   if (status.employee) { selectEmployee(status.employee); return; }
   bootstrapFlow = status.pending?.tempId || null;
-  onboardingState = bootstrapFlow ? 'waiting' : 'idle';
+  onboardingState = bootstrapFlow && status.pending.stage === 'authenticator' ? 'authenticator' : 'idle';
   renderOnboarding();
   if (!bootstrapFlow) return;
   if (status.pending.authenticated) { await fetchBootstrapProfile(); return; }
-  const poll = async () => {
-    if (generation !== sessionPollGeneration) return;
-    if (busy) { sessionPollTimer = setTimeout(poll, 1500); return; }
-    try {
-      const next = await api('/api/session');
-      if (generation !== sessionPollGeneration) return;
-      if (next.employee) { selectEmployee(next.employee); return; }
-      if (next.pending?.tempId !== bootstrapFlow) throw new Error('Sesi login telah berakhir. Akhiri sesi, lalu login SSO kembali.');
-      if (next.pending.authenticated) { await fetchBootstrapProfile(); return; }
-      sessionPollTimer = setTimeout(poll, 1500);
-    } catch (error) {
-      if (generation === sessionPollGeneration) failOnboarding(error);
-    }
-  };
-  sessionPollTimer = setTimeout(poll, 1500);
+  if (onboardingState === 'authenticator') $('#ssoCode').focus();
 }
 
+function renderSupervisorInput(){
+ const natuna=$('#quickSatker').value==='Pengadilan Negeri Natuna',choice=$('#quickSupervisorChoice').value;
+ const manual=!natuna||choice==='manual';
+ $('#natunaSupervisorChoices').hidden=!natuna;$('#manualSupervisorNip').hidden=!manual;
+ $('#quickSupervisorNip').required=manual;$('#quickSupervisorChoice').required=natuna;
+ $('#selectedSupervisorNip').textContent=!manual&&choice?`NIP pemeriksa: ${choice}`:'';
+}
+$('#quickSupervisorChoice').addEventListener('change',()=>{
+ const choice=$('#quickSupervisorChoice').value;
+ $('#quickSupervisorNip').value=choice==='manual'?'':choice;renderSupervisorInput();
+ if(choice==='manual')$('#quickSupervisorNip').focus();
+});
+$('#quickSatker').addEventListener('change',()=>{
+  const natuna=$('#quickSatker').value==='Pengadilan Negeri Natuna';
+  $('#natunaSupervisorChoices').hidden=!natuna;
+  $('#quickSupervisorChoice').value='';$('#quickSupervisorNip').value='';
+  renderSupervisorInput();
+});
 $('#employeeForm').addEventListener('submit', event => {
   event.preventDefault();
-  if (onboardingState !== 'idle') return;
+  if (busy || !['idle','authenticator'].includes(onboardingState)) return;
+  const mfa = onboardingState === 'authenticator';
   runBusy(async () => {
-    const supervisorNip = $('#quickSupervisorNip').value.trim();
-    if (!/^\d{18}$/.test(supervisorNip)) throw new Error('NIP atasan yang memeriksa LLK Anda harus tepat 18 digit angka');
     try {
-      const result = await api('/api/bootstrap/login', {
-        method: 'POST', body: JSON.stringify({ supervisorNip, department: 'umum_keuangan' })
-      });
+      let result;
+      if (mfa) {
+        const code = $('#ssoCode').value.trim();
+        $('#ssoCode').value = '';
+        result = await api('/api/bootstrap/authenticator', {method:'POST',body:JSON.stringify({tempId:bootstrapFlow,code})});
+      } else {
+        const supervisorNip = $('#quickSupervisorNip').value.trim();
+        const username = $('#ssoUsername').value.trim();
+        const password = $('#ssoPassword').value;
+        $('#ssoPassword').value = '';
+        result = await api('/api/bootstrap/login', {method:'POST',body:JSON.stringify({supervisorNip,username,password,satker:$('#quickSatker').value,department:'umum_keuangan'})});
+      }
       bootstrapFlow = result.tempId;
-      onboardingState = 'waiting';
+      onboardingState = result.stage === 'authenticator' ? 'authenticator' : 'idle';
       renderOnboarding();
-      log(result.message || 'Selesaikan login SSO di Edge.');
+      if (result.stage === 'authenticated') await fetchBootstrapProfile();
+      else { feedback(result.message || 'Masukkan kode authenticator.'); $('#ssoCode').focus(); }
     } catch (error) {
-      failOnboarding(error);
+      if (mfa && error.status !== 401) {
+        onboardingState = 'authenticator';renderOnboarding();feedback(error.message,true);$('#ssoCode').focus();
+      } else failOnboarding(error);
     }
-  }, 'Login SSO').then(() => {
-    if (onboardingState === 'waiting') resumeSession().catch(failOnboarding);
+  }, mfa ? 'Verifikasi authenticator' : 'Login SSO').then(() => {
+    if (onboardingState === 'authenticator') $('#ssoCode').focus();
   });
 });
 
@@ -994,7 +1045,7 @@ $('#clearLogBtn')?.addEventListener('click', () => {
 
 
 $('#importPersonalTemplateBtn')?.addEventListener('click', () => active && runBusy(async () => {
-  log(`Membaca halaman pertama daftar LLK untuk ${active.name}…`);
+  log(`Membaca halaman terakhir daftar LLK untuk ${active.name}…`);
   const staged = await api(`/api/employees/${active.id}/personal-template/import`, { method: 'POST', body: '{}' });
   if (!staged.available) throw new Error(staged.warning || 'Daftar LLK tidak dapat dibaca');
   renderPersonalDiff(staged);
@@ -1071,6 +1122,11 @@ $('#previewBtn')?.addEventListener('click', () => active && runBusy(async () => 
     method: 'POST',
     body: JSON.stringify({ start, end, source, department })
   });
+  if(unfilledDates){
+    if(!calendarEntries?.complete||calendarEntries.loading||calendarEntries.error)throw new Error('Status kalender belum lengkap. Perbarui isian LLK dan pilih ulang tanggal.');
+    for(let index=preview.length-1;index>=0;index--)if(!unfilledDates.has(preview[index].date)||calendarEntries.dates.has(preview[index].date))preview.splice(index,1);
+    if(!preview.length)throw new Error('Tidak ada hari belum terisi pada pilihan ini.');
+  }
   previewSource = { source, department };
   renderPreview(preview);
   setWizardStep(3);

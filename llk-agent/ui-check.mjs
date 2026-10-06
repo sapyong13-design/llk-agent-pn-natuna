@@ -57,8 +57,10 @@ try {
     setWizardStep(2);
     const verify = { createHidden: document.querySelector('#createLlkMode').hidden, reviewHidden: !document.querySelector('#reviewStep').classList.contains('is-active') };
     document.querySelector('[name="workflowMode"][value="create"]').checked = true;
-    renderPreview(['2026-09-01', '2026-09-02'].map(date => ({ date, items: [{ start: '08:00', end: '16:30', description: 'Pemeriksaan UI lokal', type: 'Utama', result: 'Selesai' }] })));
+    renderPreview(['2026-09-01', '2026-09-02'].map((date, index) => ({ date, activitySource: index === 0 ? 'llk-latest-page' : 'general', items: [{ start: '08:00', end: '16:30', description: 'Pemeriksaan UI lokal', type: 'Utama', result: 'Selesai' }] })));
     setWizardStep(3);
+    const sourceSummary = document.querySelector('#selectedRangeText').textContent;
+    const activitySources = [...document.querySelectorAll('.day-meta')].filter(node => node.textContent.startsWith('Kegiatan:')).map(node => node.textContent.trim());
     const collapsed = document.querySelectorAll('.day-details:not([open])').length;
     document.querySelector('[data-toggle-edit="0"]').click();
     const field = document.querySelector('[data-field="description"]');
@@ -68,7 +70,7 @@ try {
     const sendDisabled = document.querySelector('#submitBtn').disabled;
     const results = document.createElement('div');
     results.innerHTML = verificationList([{ date: '2026-09-01', success: true }, { date: '2026-09-02', success: false, error: 'net::ERR_ABORTED' }], 'result');
-    return { calendarCount, verify, collapsed, edited, sendDisabled, uncertain: results.querySelector('.verification-item--uncertain') !== null, details: results.querySelectorAll('.error-details').length };
+    return { calendarCount, verify, collapsed, edited, sendDisabled, sourceSummary, activitySources, uncertain: results.querySelector('.verification-item--uncertain') !== null, details: results.querySelectorAll('.error-details').length };
   });
   assert.equal(result.calendarCount, 5);
   assert.deepEqual(result.verify, { createHidden: true, reviewHidden: true });
@@ -77,6 +79,9 @@ try {
   assert.equal(result.sendDisabled, true);
   assert.equal(result.uncertain, true);
   assert.equal(result.details, 1);
+  assert.equal(result.sourceSummary.includes('Halaman terbaru LLK, Template umum'), true);
+  assert.deepEqual(result.activitySources, ['Kegiatan: Halaman terbaru LLK', 'Kegiatan: template umum']);
+  assert.equal(await page.locator('#sourceSummaryText').textContent(), 'Halaman terbaru LLK');
   assert.equal(await page.locator('#createLlkMode').isVisible(), false);
   await page.locator('#changeDatesBtn').click();
   assert.equal(await page.locator('#createLlkMode').isVisible(), true);

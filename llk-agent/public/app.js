@@ -236,7 +236,7 @@ function setWizardStep(step) {
   });
   $('#dateSelectionSummary').hidden = verify || stage !== 'preview';
   if (currentPreview) {
-    const sources = [...new Set(currentPreview.map(day => day.activitySource === 'llk-page-1' ? 'Halaman terakhir LLK' : 'Template umum'))];
+    const sources = [...new Set(currentPreview.map(day => day.activitySource === 'llk-latest-page' ? 'Halaman terbaru LLK' : 'Template umum'))];
     $('#selectedRangeText').textContent = `${formatIndonesianDate(calendarSelection.start)} – ${formatIndonesianDate(calendarSelection.end || calendarSelection.start)} · ${currentPreview.length} hari · ${sources.join(', ')}`;
   }
   $('#workTitle').textContent = verify ? 'Verifikasi LLK Anggota' : 'Buat LLK';
@@ -421,7 +421,7 @@ function renderPreview(preview) {
                 <span class="preview-status status-ready" data-day-status="${di}">Siap</span>
               </div>
               <small class="day-meta ${verifiedSupervisor ? 'supervisor-verified' : 'supervisor-unverified'}">Atasan: ${escapeHtml(verifier.name || 'Belum diverifikasi')} · NIP ${escapeHtml(verifier.nip || verifier.id || verifier.routeId || '—')} <span class="supervisor-source">${verifiedSupervisor ? 'Terverifikasi dari LLK' : 'Belum terverifikasi'}</span></small>
-              <small class="day-meta">Kegiatan: ${day.activitySource === 'llk-page-1' ? 'halaman terakhir LLK' : 'template umum'}</small>
+              <small class="day-meta">Kegiatan: ${day.activitySource === 'llk-latest-page' ? 'Halaman terbaru LLK' : 'template umum'}</small>
             </div>
             <button class="btn btn-sm btn-outline edit-toggle-btn" type="button" data-toggle-edit="${di}">${isEditing ? 'Tutup edit' : 'Edit isian'}</button>
           </header>
@@ -521,7 +521,7 @@ function renderReport(report) {
 
 function renderPersonalTemplate(info) {
   const activities = info.source === 'personal' ? (info.activities || []) : [];
-  const sourceText = $('#personalTemplateSourceText'); if (sourceText) sourceText.textContent = 'Halaman terakhir LLK';
+  const sourceText = $('#personalTemplateSourceText'); if (sourceText) sourceText.textContent = 'Halaman terbaru LLK';
   const fallbackText = $('#personalTemplateFallbackText'); if (fallbackText) fallbackText.textContent = active?.department || info.fallbackLabel || '—';
   const countNode = $('#personalTemplateCount'); if (countNode) countNode.textContent = `${activities.length} kegiatan`;
   const tbody = $('#pageTemplateBody'); if (tbody) tbody.innerHTML = activityRows(activities, 'halaman LLK');
@@ -552,7 +552,7 @@ function renderPersonalDiff(staged) {
   const removed = (staged.diff?.removed || []).map(normalize);
 
   const summary = $('#personalStageSummary');
-  if (summary) summary.textContent = `${activities.length} total (${added.length} baru)`;
+  if (summary) summary.textContent = `${activities.length} total (${added.length} baru) · Halaman terbaru LLK${staged.latestDate ? ` · tanggal kegiatan terbaru ${formatIndonesianDate(staged.latestDate)}` : ''}${staged.sourceUrl ? ` · ${staged.sourceUrl}` : ''}`;
 
   const diffRows = [
     ...added.map(act => ({ status: 'BARU', rowClass: 'tag-badge', act })),
@@ -1090,18 +1090,18 @@ $('#clearLogBtn')?.addEventListener('click', () => {
 
 
 $('#importPersonalTemplateBtn')?.addEventListener('click', () => active && runBusy(async () => {
-  log(`Membaca halaman terakhir daftar LLK untuk ${active.name}…`);
+  log(`Membaca halaman dengan tanggal kegiatan terbaru dari daftar LLK untuk ${active.name}…`);
   const staged = await api(`/api/employees/${active.id}/personal-template/import`, { method: 'POST', body: '{}' });
   if (!staged.available) throw new Error(staged.warning || 'Daftar LLK tidak dapat dibaca');
   renderPersonalDiff(staged);
-  log(`${staged.scannedEntries || 0} entri LLK dibaca dari ${staged.pagesScanned || 1} halaman (${staged.sourceUrl || '/llk'}); ${staged.candidate?.activities?.length || 0} pola unik siap ditinjau.`);
-}, 'Impor Seluruh LLK'));
+  log(`${staged.scannedEntries || 0} entri LLK pada halaman terbaru (${staged.sourceUrl || '/llk'}); ${staged.pagesScanned || 1} halaman diperiksa; ${staged.candidate?.activities?.length || 0} pola unik siap ditinjau.`);
+}, 'Impor Halaman Terbaru LLK'));
 
 
 document.querySelectorAll('[name="activitySource"]').forEach(input => input.addEventListener('change', () => {
   const general = document.querySelector('[name="activitySource"]:checked')?.value === 'general';
   $('#sourceDepartmentWrap').hidden = !general;
-  const srcLabel = $('#sourceSummaryText'); if (srcLabel) srcLabel.textContent = general ? 'Template umum' : 'Halaman terakhir LLK';
+  const srcLabel = $('#sourceSummaryText'); if (srcLabel) srcLabel.textContent = general ? 'Template umum' : 'Halaman terbaru LLK';
   if (general && active?.department) $('#sourceDepartmentSelect').value = active.department;
 }));
 
@@ -1162,7 +1162,7 @@ $('#previewBtn')?.addEventListener('click', () => active && runBusy(async () => 
     $('#previewArea').scrollIntoView({ block: 'start', behavior: 'smooth' });
     return;
   }
-  log(`Menyiapkan isian LLK dari ${start} sampai ${end}; pola jam kerja dibaca dari LLK sebelumnya; sumber: ${source === 'general' ? 'template umum' : 'halaman terakhir LLK'}…`);
+  log(`Menyiapkan isian LLK dari ${start} sampai ${end}; pola jam kerja dibaca dari LLK sebelumnya; sumber: ${source === 'general' ? 'template umum' : 'Halaman terbaru LLK'}…`);
   const preview = await api(`/api/employees/${active.id}/preview`, {
     method: 'POST',
     body: JSON.stringify({ start, end, source, department })

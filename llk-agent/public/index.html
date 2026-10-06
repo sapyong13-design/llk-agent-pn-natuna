@@ -198,10 +198,10 @@
                   </div>
                   <p class="calendar-summary" id="calendarSummary">Pilih tanggal mulai dan selesai.</p>
                   <details class="source-details">
-                    <summary>Sumber kegiatan: <strong id="sourceSummaryText">Halaman terakhir LLK</strong></summary>
+                    <summary>Sumber kegiatan: <strong id="sourceSummaryText">Halaman terbaru LLK</strong></summary>
                     <fieldset class="source-picker">
                       <legend class="sr-only">Sumber kegiatan</legend>
-                      <label class="source-option"><input type="radio" name="activitySource" value="page" checked><span><strong>Halaman terakhir LLK</strong><small>Default · memakai kegiatan unik pada halaman terakhir daftar LLK.</small></span></label>
+                      <label class="source-option"><input type="radio" name="activitySource" value="page" checked><span><strong>Halaman terbaru LLK</strong><small>Default · memakai kegiatan unik pada halaman dengan tanggal kegiatan paling baru. Seluruh halaman diperiksa; bukan nomor halaman terbesar.</small></span></label>
                       <label class="source-option"><input type="radio" name="activitySource" value="general"><span><strong>Template umum</strong><small>Pilih bagian pengadilan jika kegiatan halaman LLK tidak ingin digunakan.</small></span></label>
                       <div class="form-group source-department" id="sourceDepartmentWrap" hidden>
                         <label for="sourceDepartmentSelect">Bagian pengadilan</label>
@@ -212,9 +212,9 @@
           <details class="source-details" id="activityTemplateSection">
             <summary>Kelola daftar kegiatan</summary>
             <details class="template-details" open>
-              <summary>Halaman terakhir LLK · <small id="personalTemplateCount">—</small></summary>
+              <summary>Halaman terbaru LLK · <small id="personalTemplateCount">—</small></summary>
               <div id="pageActivitySummary" class="personal-summary-strip">
-                <div><small>Sumber</small><strong id="personalTemplateSourceText">Halaman LLK</strong></div>
+                <div><small>Sumber</small><strong id="personalTemplateSourceText">Halaman terbaru LLK</strong></div>
                 <div><small>Bagian akun</small><span id="personalTemplateFallbackText">—</span></div>
               </div>
               <div class="table-scroll">
@@ -224,7 +224,7 @@
                 </table>
               </div>
               <div class="button-row" id="pageActivityActions">
-                <button class="btn btn-outline" id="importPersonalTemplateBtn" type="button">Perbarui dari halaman terakhir LLK</button>
+                <button class="btn btn-outline" id="importPersonalTemplateBtn" type="button">Perbarui dari halaman terbaru LLK</button>
                 <button class="btn btn-danger btn-sm" id="resetPersonalTemplateBtn" type="button">Hapus daftar sesi ini</button>
               </div>
             </details>

@@ -6,7 +6,7 @@ Otomasi pengisian LLK harian untuk pegawai Pengadilan Negeri Natuna — dibuat k
 
 ## Fitur
 
-- **Pratinjau isian LLK per rentang tanggal** — sumber kegiatan default adalah kegiatan unik dari halaman terakhir akun LLK kamu; alternatifnya template umum per bagian pengadilan.
+- **Pratinjau isian LLK per rentang tanggal** — sumber kegiatan default adalah kegiatan unik dari satu halaman yang memuat tanggal kegiatan terbaru akun LLK; alternatifnya template umum per bagian pengadilan.
 - **Kalender kerja 2026** — libur nasional, cuti bersama (SKB 3 Menteri 2026), dan Sabtu/Minggu ditandai langsung di kalender; hari nonkerja otomatis dilewati saat menyusun isian.
 - **Profil per pegawai** — konteks browser terpisah; nama, satker, dan atasan dibaca otomatis dari akun SSO.
 - **Verifikasi & kirim** — cek daftar verifikasi dari atasan langsung dan kirim LLK tanpa buka situs.
@@ -64,7 +64,7 @@ bash llk-agent/deploy-cpanel.sh --apply
 
 Form authenticator CAS memakai `token` dan `accountId`; pada halaman SSO saat ini `accountId` diisi oleh JavaScript inline. Klien HTTP membaca deklarasi numeriknya tanpa menjalankan script upstream. Regresi memastikan pilihan akun MFA ikut dikirim, termasuk saat kode dicoba ulang.
 
-Kalender membaca seluruh halaman daftar LLK, menampilkan jumlah halaman dan waktu pembacaan. Tanggal tanpa label Terisi hanya dianggap belum terisi setelah pemindaian lengkap; pembacaan gagal tidak dianggap kosong. Sumber kegiatan default tetap halaman terakhir. Sebelum kirim, tanggal duplikat diperiksa pada seluruh halaman. Setiap tanggal memakai form/CSRF baru; keberhasilan harus terbukti dari tanggal dan isi yang terbaca kembali. Verifikasi anggota memindai filter Belum Terverifikasi, menahan target tidak valid, lalu memeriksa status dan pesan tersimpan setelah kirim. POST tidak dicoba ulang otomatis jika gagal atau hasil belum pasti.
+Kalender membaca seluruh halaman daftar LLK, menampilkan jumlah halaman dan waktu pembacaan. Tanggal tanpa label Terisi hanya dianggap belum terisi setelah pemindaian lengkap; pembacaan gagal tidak dianggap kosong. Sumber kegiatan default **Halaman terbaru LLK**: seluruh pagination dipindai, lalu hanya kegiatan dari satu halaman dengan tanggal kegiatan terbesar dipakai. Nomor halaman terbesar bukan penentu; daftar terbaru-ke-terlama tidak lagi memilih kegiatan paling lama. Pembacaan halaman lanjutan yang gagal membatalkan pemilihan sumber, bukan memakai hasil parsial. Sebelum kirim, tanggal duplikat diperiksa pada seluruh halaman. Setiap tanggal memakai form/CSRF baru; keberhasilan harus terbukti dari tanggal dan isi yang terbaca kembali. Verifikasi anggota memindai filter Belum Terverifikasi, menahan target tidak valid, lalu memeriksa status dan pesan tersimpan setelah kirim. POST tidak dicoba ulang otomatis jika gagal atau hasil belum pasti.
 
 Status verifikasi dibaca dari label daftar resmi, bukan hidden `verified=2` pada form edit. Field tersebut adalah tindakan yang akan dikirim dan dapat bernilai 2 ketika LLK masih Belum Terverifikasi. Pemeriksaan sebelum/sesudah POST mencocokkan ID numerik `hllk` dari form edit pada seluruh halaman daftar, bukan kesamaan URL `cid`; pesan juga dibaca kembali. Regresi memakai hidden `verified=2` dan URL `cid` berbeda sebelum/sesudah kirim.
 

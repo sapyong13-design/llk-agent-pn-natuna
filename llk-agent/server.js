@@ -246,7 +246,7 @@ async function generatePreview(app, employee, start, end, source = 'page', depar
   if (!templates[selectedDepartment]) bad('Template bagian tidak tersedia');
   const useGeneral = source === 'general';
   const activities = useGeneral ? templates[selectedDepartment].activities : pageActivities;
-  if (!activities?.length) bad(useGeneral ? 'Template umum bagian ini belum memiliki kegiatan' : 'Halaman pertama LLK belum memiliki kegiatan. Pilih Template umum sebagai sumber alternatif.');
+  if (!activities?.length) bad(useGeneral ? 'Template umum bagian ini belum memiliki kegiatan' : 'Halaman terbaru LLK belum memiliki kegiatan. Pilih Template umum sebagai sumber alternatif.');
   let index = 0;
   return (await workdays(start, end)).map(day => {
     const schedulePattern = inferSchedulePattern(day, priorEntries);
@@ -263,7 +263,7 @@ async function generatePreview(app, employee, start, end, source = 'page', depar
         activityItem(activities[index++ % activities.length], afternoonStart, afternoonEnd)
       ];
     }
-    return { date: day.iso, supervisor: employee.supervisor, activitySource: useGeneral ? 'template-general' : 'llk-page-1', schedulePattern, items };
+    return { date: day.iso, supervisor: employee.supervisor, activitySource: useGeneral ? 'template-general' : 'llk-latest-page', schedulePattern, items };
   });
 }
 function minute(value) { if (!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(value)) bad('Jam kegiatan tidak valid'); const [h,m] = value.split(':').map(Number); return h * 60 + m; }
@@ -406,7 +406,7 @@ async function readPersonal(session,id){return session.personalTemplates.get(id)
 function validatePersonal(value,id){if(!value||typeof value!=='object'||value.employeeId!==id||!Array.isArray(value.activities)||value.activities.length>1000)bad('Daftar kegiatan profil tidak valid');const activities=value.activities.map(a=>{const nama=clean(a?.nama),kategori=clean(a?.kategori)||'Pendukung';if(!nama||isBreakActivity(nama)||!['Utama','Pendukung'].includes(kategori))bad('Kegiatan profil tidak valid');return {nama,kategori,result:'Selesai',...(a.start?{start:clean(a.start)}:{}),...(a.end?{end:clean(a.end)}:{})};});return {...value,activities};}
 async function personalResponse(session,employee){const personal=await readPersonal(session,employee.id),stored=await readJson(templateFile(session.app)),departments=stored.departments||stored,fallback=departments[employee.department];return {source:personal?.activities?.length?'personal':'department',personal,activities:personal?.activities?.length?personal.activities:(fallback?.activities||[]),fallbackLabel:fallback?.label||employee.department};}
 async function importPersonal(session,id,client=session.client) {
-    const entries=await readEntries(client,{scope:'last'}),current=await readPersonal(session,id);
+    const entries=await readEntries(client,{scope:'latest'}),current=await readPersonal(session,id);
     if(entries.available===false)return {available:false,current,candidate:null,warning:'Riwayat LLK tidak tersedia; template pribadi tidak diubah.'};
     const seen = new Map();
     for (const entry of Array.isArray(entries) ? entries : []) {
@@ -425,7 +425,7 @@ async function importPersonal(session,id,client=session.client) {
     assertSession(session);
     if(session.expiring)throw new HttpError(401,'Sesi login berakhir.');
     session.stagedPersonal.set(id, { stageToken, token: stageToken, digest, candidate, expires: Date.now() + 15 * 60 * 1000 });
-    return { available: true, current, candidate, activities, scannedEntries: entries.length, pagesScanned: entries.pagesScanned || 1, sourceUrl: entries.sourceUrl || null, stageToken, digest, diff: { added: activities.length, modified: 0, removed: current?.activities?.length || 0 } };
+    return { available: true, current, candidate, activities, scannedEntries: entries.length, pagesScanned: entries.pagesScanned || 1, sourceUrl: entries.sourceUrl || null, latestDate: entries.latestDate, stageToken, digest, diff: { added: activities.length, modified: 0, removed: current?.activities?.length || 0 } };
 }
 
 async function enrichEmployeeFromSso(employee,client) {
@@ -547,11 +547,11 @@ async function api(session,req,res,url) {
       const employee=await findEmployee(session,id),client=await employeeClient(session,id);
         const source=input.source==='general'?'general':'page';
         progress(session,id,'preview-start',`Menyiapkan isian ${input.start} sampai ${input.end}…`);
-        const entries=await readEntries(client,{scope:'last'});
+        const entries=await readEntries(client,{scope:'latest'});
         const pageActivities = source === 'page'
           ? [...new Map(entries.filter(entry => !entry.isBreak).map(item => [canonical({ description: item.description, type: item.type }), item])).values()]
           : [];
-        progress(session,id,'preview-llk-done', `LLK sebelumnya terbaca: ${entries.length} baris.`);
+        progress(session,id,'preview-llk-done', `Halaman terbaru LLK terbaca: ${entries.length} baris.`);
         return generatePreview(session.app, employee, input.start, input.end, source, input.department, pageActivities, entries);
     }));
   }

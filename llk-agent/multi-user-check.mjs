@@ -150,7 +150,7 @@ try {
   await writeFile(join(dataDir, 'department-templates.json'), await readFile(new URL('./data/department-templates.json', import.meta.url)));
   async function start(ttl) {
     const upstream = fakeUpstream();
-    const server = await createAppServer({ authFactory: upstream.authFactory, clientFactory: upstream.clientFactory, dataDir, sessionTtlMs: ttl });
+    const server = await createAppServer({ authFactory: upstream.authFactory, clientFactory: upstream.clientFactory, dataDir, sessionTtlMs: ttl, publicOrigin: '' });
     running.push({ server, upstream });
     const listening = once(server, 'listening');
     server.listen(0, '127.0.0.1');

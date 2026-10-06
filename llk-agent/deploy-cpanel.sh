@@ -64,8 +64,10 @@ rollback() {
   trap - ERR
   echo "Deploy failed. Restoring $BACKUP" >&2
   stop_workers || return 1
+  rm -rf "$APP/public"
   tar -xzf "$BACKUP/app.tgz" -C "$APP"
   cp -p "$BACKUP/webroot.htaccess" "$WEB/.htaccess"
+  (cd "$APP" && npm ci --omit=dev --no-audit --no-fund) || return 1
   cloudlinux-selector start --json --interpreter nodejs --user pnnatuna --app-root private/llk/current
   exit 1
 }

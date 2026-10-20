@@ -318,6 +318,12 @@ function minutes(time) {
   return (hours || 0) * 60 + (mins || 0);
 }
 
+
+function isApelPagi(desc) { return /(?:^|\b)apel\s+(?:pagi|senin)(?:\b|$)/i.test(desc.trim()); }
+function isApelSore(desc) { return /(?:^|\b)apel\s+(?:sore|jumat|jum'at)(?:\b|$)/i.test(desc.trim()); }
+function isOlahraga(desc) { return /(?:^|\b)(?:olahraga|senam)(?:\s+pagi|\s+bersama|\s+jumat)?(?:\b|$)/i.test(desc.trim()); }
+function isUpacara(desc) { return /(?:^|\b)upacara(?:\b|$)/i.test(desc.trim()); }
+
 function matchesOfficialSchedule(day) {
   const friday = new Date(`${day.date}T00:00:00`).getDay() === 5;
   const allowed = friday
@@ -335,6 +341,23 @@ function validatePreview(preview) {
       if (!/^\d{2}:\d{2}$/.test(item.start) || !/^\d{2}:\d{2}$/.test(item.end) || minutes(item.start) >= minutes(item.end)) errors.push(`${label}: rentang waktu tidak valid.`);
       if (!item.description.trim() || !item.result.trim()) errors.push(`${label}: kegiatan dan hasil wajib diisi.`);
       if (!['Utama', 'Pendukung'].includes(item.type)) errors.push(`${label}: jenis tidak valid.`);
+    });
+    const dow = new Date(`${day.date}T00:00:00`).getDay();
+    day.items.forEach((item, index) => {
+      const desc = item.description.trim();
+      const label = `${day.date}, baris ${index + 1}`;
+      if (isUpacara(desc)) {
+        errors.push(`${label}: upacara bersifat tahunan / situasional, tidak boleh dimasukkan dalam isian LLK rutin.`);
+      }
+      if (isApelPagi(desc) && (dow !== 1 || index !== 0)) {
+        errors.push(`${label}: apel pagi hanya boleh diisi pada hari Senin pagi.`);
+      }
+      if (isApelSore(desc) && (dow !== 5 || index !== day.items.length - 1)) {
+        errors.push(`${label}: apel sore hanya boleh diisi pada hari Jumat sore.`);
+      }
+      if (isOlahraga(desc) && (dow !== 5 || index !== 0)) {
+        errors.push(`${label}: olahraga bersama hanya boleh diisi pada hari Jumat pagi.`);
+      }
     });
     if (!matchesOfficialSchedule(day)) errors.push(`${day.date}: gunakan pola jam kerja resmi; pola terpisah wajib memuat baris Istirahat.`);
   });
@@ -381,8 +404,14 @@ function updatePreviewStatuses(preview, report = null) {
     let label = result ? (state === 'uncertain' ? 'Belum pasti' : result.statusLabel || { saved:'Tersimpan di LLK', skipped:'Sudah ada di LLK', failed:'Gagal', ready:'Belum dikirim' }[state] || state) : 'Siap';
     if (!result) {
       const dayErrors = [];
-      day.items.forEach(item => {
+      const dow = new Date(`${day.date}T00:00:00`).getDay();
+      day.items.forEach((item, index) => {
+        const desc = item.description.trim();
         if (!/^\d{2}:\d{2}$/.test(item.start) || !/^\d{2}:\d{2}$/.test(item.end) || minutes(item.start) >= minutes(item.end) || !item.description.trim() || !item.result.trim() || !['Utama','Pendukung'].includes(item.type)) dayErrors.push(true);
+        if (isUpacara(desc)) dayErrors.push(true);
+        if (isApelPagi(desc) && (dow !== 1 || index !== 0)) dayErrors.push(true);
+        if (isApelSore(desc) && (dow !== 5 || index !== day.items.length - 1)) dayErrors.push(true);
+        if (isOlahraga(desc) && (dow !== 5 || index !== 0)) dayErrors.push(true);
       });
       if (!matchesOfficialSchedule(day)) dayErrors.push(true);
       if (dayErrors.length) { state = 'failed'; label = 'Perlu diperbaiki'; }

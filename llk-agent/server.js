@@ -166,6 +166,30 @@ const bodyJson = req => req.parsedBodyPromise || new Promise((done, reject) => {
 const employeeId = nip => String(nip || '').replace(/\D/g, '');
 const clean = value => String(value ?? '').replace(/\s+/g, ' ').trim();
 const isBreakActivity = value => /^(?:istirahat(?:\s+(?:siang|makan|shalat|makan\s+siang))?|ishoma(?:\s+dan\s+shalat)?|istirahat\s*,?\s*shalat(?:\s+dan\s+makan)?)(?:\s*[-–—].*)?$/i.test(clean(value));
+const isApelPagiActivity = value => /(?:^|\b)apel\s+(?:pagi|senin)(?:\b|$)/i.test(clean(value));
+const isApelSoreActivity = value => /(?:^|\b)apel\s+(?:sore|jumat|jum'at)(?:\b|$)/i.test(clean(value));
+const isOlahragaActivity = value => /(?:^|\b)(?:olahraga|senam)(?:\s+pagi|\s+bersama|\s+jumat)?(?:\b|$)/i.test(clean(value));
+const isUpacaraActivity = value => /(?:^|\b)upacara(?:\b|$)/i.test(clean(value));
+
+function isPermittedOnDay(desc, dow, timeSlot = 'morning') {
+  const d = clean(desc);
+  // Upacara tidak boleh dimasukkan dalam template rutin / generate preview otomatis
+  if (isUpacaraActivity(d)) return false;
+  // Apel pagi HANYA boleh di Senin pagi (dow === 1, timeSlot === 'morning')
+  if (isApelPagiActivity(d)) return dow === 1 && timeSlot === 'morning';
+  // Apel sore HANYA boleh di Jumat sore (dow === 5, timeSlot === 'afternoon')
+  if (isApelSoreActivity(d)) return dow === 5 && timeSlot === 'afternoon';
+  // Olahraga bersama HANYA boleh di Jumat pagi (dow === 5, timeSlot === 'morning')
+  if (isOlahragaActivity(d)) return dow === 5 && timeSlot === 'morning';
+  // Jika ada kata apel tanpa keterangan pagi/sore:
+  if (/(?:^|\b)apel(?:\b|$)/i.test(d)) {
+    if (dow === 1 && timeSlot === 'morning') return true;
+    if (dow === 5 && timeSlot === 'afternoon') return true;
+    return false;
+  }
+  return true;
+}
+
 function safeId(value) { const id=String(value||''); if(!/^[A-Za-z0-9_-]{1,80}$/.test(id)) bad('ID pegawai tidak valid'); return id; }
 function canonical(value) { if(Array.isArray(value)) return `[${value.map(canonical).join(',')}]`; if(value&&typeof value==='object') return `{${Object.keys(value).sort().map(key=>`${JSON.stringify(key)}:${canonical(value[key])}`).join(',')}}`; return JSON.stringify(value); }
 function sanitize(value) { if(Array.isArray(value)) return value.map(sanitize); if(value&&typeof value==='object'){const out={}; for(const [key,item] of Object.entries(value)) if(!sensitiveKeys.test(key)) out[key]=sanitize(item); return out;} return typeof value==='string'?clean(value).slice(0,500):value; }
@@ -260,22 +284,52 @@ async function generatePreview(app, employee, start, end, source = 'page', depar
   const selectedDepartment = clean(department) || employee.department;
   if (!templates[selectedDepartment]) bad('Template bagian tidak tersedia');
   const useGeneral = source === 'general';
-  const activities = useGeneral ? templates[selectedDepartment].activities : pageActivities;
-  if (!activities?.length) bad(useGeneral ? 'Template umum bagian ini belum memiliki kegiatan' : 'Halaman terbaru LLK belum memiliki kegiatan. Pilih Template umum sebagai sumber alternatif.');
-  let index = 0;
+  // Filter keluar kegiatan tahunan/upacara dari kumpulan kegiatan
+  const rawActivities = (useGeneral ? templates[selectedDepartment].activities : pageActivities).filter(a => !isUpacaraActivity(a.nama || a.description));
+  if (!rawActivities?.length) bad(useGeneral ? 'Template umum bagian ini belum memiliki kegiatan' : 'Halaman terbaru LLK belum memiliki kegiatan. Pilih Template umum sebagai sumber alternatif.');
+  
+  let ptr = 0;
+  function pickActivity(dow, timeSlot) {
+    // 1. Cek apakah ada kegiatan khusus yang WAJIB/COCOK untuk slot ini jika tersedia
+    if (dow === 1 && timeSlot === 'morning') {
+      const apel = rawActivities.find(a => isApelPagiActivity(a.nama || a.description));
+      if (apel) return apel;
+    }
+    if (dow === 5 && timeSlot === 'morning') {
+      const olah = rawActivities.find(a => isOlahragaActivity(a.nama || a.description));
+      if (olah) return olah;
+    }
+    if (dow === 5 && timeSlot === 'afternoon') {
+      const apelS = rawActivities.find(a => isApelSoreActivity(a.nama || a.description));
+      if (apelS) return apelS;
+    }
+    // 2. Jika bukan kegiatan khusus atau tidak ada, ambil kegiatan rutin berikutnya yang lolos aturan
+    for (let i = 0; i < rawActivities.length; i++) {
+      const cand = rawActivities[(ptr + i) % rawActivities.length];
+      const desc = cand.nama || cand.description;
+      if (isPermittedOnDay(desc, dow, timeSlot)) {
+        ptr = (ptr + i + 1) % rawActivities.length;
+        return cand;
+      }
+    }
+    // Fallback jika semua kegiatan adalah kegiatan khusus:
+    const generalFallback = rawActivities.find(a => !isApelPagiActivity(a.nama||a.description) && !isApelSoreActivity(a.nama||a.description) && !isOlahragaActivity(a.nama||a.description)) || rawActivities[0];
+    return generalFallback;
+  }
+
   return (await workdays(start, end)).map(day => {
     const schedulePattern = inferSchedulePattern(day, priorEntries);
     const activityItem = (activity, start, end) => ({ description: activity.nama || activity.description, type: activity.kategori || activity.type || 'Pendukung', result: 'Selesai', start, end });
     let items;
     if (schedulePattern === 'full') {
       const [[start, end]] = officialSchedule(day, 'full');
-      items = [activityItem(activities[index++ % activities.length], start, end)];
+      items = [activityItem(pickActivity(day.dow, 'full'), start, end)];
     } else {
       const [[morningStart, morningEnd], [afternoonStart, afternoonEnd]] = officialSchedule(day, 'split');
       items = [
-        activityItem(activities[index++ % activities.length], morningStart, morningEnd),
+        activityItem(pickActivity(day.dow, 'morning'), morningStart, morningEnd),
         { start: morningEnd, end: afternoonStart, description: 'Istirahat', type: 'Pendukung', result: 'Selesai' },
-        activityItem(activities[index++ % activities.length], afternoonStart, afternoonEnd)
+        activityItem(pickActivity(day.dow, 'afternoon'), afternoonStart, afternoonEnd)
       ];
     }
     return { date: day.iso, supervisor: employee.supervisor, activitySource: useGeneral ? 'template-general' : 'llk-latest-page', schedulePattern, items };
@@ -297,6 +351,10 @@ async function validatePreview(preview) {
       const start = clean(item.start), end = clean(item.end), from = minute(start), to = minute(end);
       const description = clean(item.description), type = clean(item.type), result = clean(item.result);
       if (to <= from || !description || description.length > 2000 || !result || result.length > 500 || !['Utama','Pendukung'].includes(type)) bad(`Susunan waktu/kegiatan ${day.date} tidak valid`);
+      if (isUpacaraActivity(description)) bad(`Kegiatan upacara (${day.date}) tidak diizinkan dalam pengisian rutin.`);
+      if (isApelPagiActivity(description) && (dow !== 1 || itemIndex !== 0)) bad(`Apel pagi (${day.date}) hanya boleh diisi pada hari Senin pagi.`);
+      if (isApelSoreActivity(description) && (dow !== 5 || itemIndex !== day.items.length - 1)) bad(`Apel sore (${day.date}) hanya boleh diisi pada hari Jumat sore.`);
+      if (isOlahragaActivity(description) && (dow !== 5 || itemIndex !== 0)) bad(`Olahraga bersama (${day.date}) hanya boleh diisi pada hari Jumat pagi.`);
       return { start, end, description, type, result };
     });
     const actualBlocks = items.map(item => [item.start, item.end]);
@@ -428,7 +486,7 @@ async function importPersonal(session,id,client=session.client) {
     const seen = new Map();
     for (const entry of Array.isArray(entries) ? entries : []) {
       const nama = clean(entry.description);
-      if (!nama || entry.isBreak || isBreakActivity(nama)) continue;
+      if (!nama || entry.isBreak || isBreakActivity(nama) || isUpacaraActivity(nama)) continue;
       const activity = { nama, kategori: /^(Utama|Pendukung)$/i.test(entry.type) ? clean(entry.type) : 'Pendukung' };
       const result = clean(entry.result || entry.output); if (result) activity.result = result;
       const key = canonical(activity);

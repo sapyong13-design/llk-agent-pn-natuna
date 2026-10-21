@@ -19,7 +19,12 @@ export async function scanVerification(client,{progress=()=>{}}={}){
  }
  const unique=[...new Map(rows.map(row=>[row.editUrl,row])).values()],counts=new Map();for(const row of unique)if(row.date)counts.set(row.date,(counts.get(row.date)||0)+1);
  const valid=[],invalid=[];
- for(const row of unique){const issues=[];if(!row.date)issues.push('Tanggal kegiatan tidak terbaca');else if(counts.get(row.date)>1)issues.push(`Tanggal duplikat: ${row.date}`);const dow=row.date?new Date(row.date+'T12:00:00').getDay():null,expected=dow===5?'17:00':dow>=1&&dow<=4?'16:30':null;if(!row.activities.length)issues.push('Rincian kegiatan tidak terbaca');else if(expected&&row.activities.at(-1).end!==expected)issues.push(`Jam akhir seharusnya ${expected}`);const work=row.activities.filter(x=>!isBreak(x.description));if(!work.length)issues.push('Deskripsi hanya istirahat atau kosong');else if(work.some(x=>x.description.length<4))issues.push('Deskripsi kegiatan belum benar');
+ for(const row of unique){const issues=[];if(!row.date)issues.push('Tanggal kegiatan tidak terbaca');else if(counts.get(row.date)>1)issues.push(`Tanggal duplikat: ${row.date}`);const dow=row.date?new Date(row.date+'T12:00:00').getDay():null,minExpected=dow===5?'17:00':dow>=1&&dow<=4?'16:30':null;
+if(!row.activities.length)issues.push('Rincian kegiatan tidak terbaca');
+else if(minExpected){
+  const lastEnd=row.activities.at(-1).end;
+  if(!lastEnd||lastEnd<minExpected)issues.push(`Jam akhir minimal ${minExpected} (saat ini ${lastEnd||'kosong'})`);
+}const work=row.activities.filter(x=>!isBreak(x.description));if(!work.length)issues.push('Deskripsi hanya istirahat atau kosong');else if(work.some(x=>x.description.length<4))issues.push('Deskripsi kegiatan belum benar');
  if(!issues.length){try{const edit=await client.get(row.editUrl,page.url),hllk=edit.$('input[name="hllk"]').val();if(!/^\d+$/.test(hllk||''))fail('ID LLK tidak terbaca');row.hllk=String(hllk);}catch(error){issues.push(error.message);}}
  row.valid=!issues.length;row.issues=issues;(row.valid?valid:invalid).push(row);
  }

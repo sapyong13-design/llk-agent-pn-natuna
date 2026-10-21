@@ -17,9 +17,26 @@ export async function scanVerification(client,{progress=()=>{}}={}){
  });
  pages++;progress('verification-page',`Membaca halaman verifikasi ${pages}…`,{page:pages,rowsFound:rows.length});const next=pagination(page).next;if(!next)break;page=await client.get(next.url,page.url);
  }
- const unique=[...new Map(rows.map(row=>[row.editUrl,row])).values()],counts=new Map();for(const row of unique)if(row.date)counts.set(row.date,(counts.get(row.date)||0)+1);
+ const unique=[...new Map(rows.map(row=>[row.editUrl,row])).values()];
+ // Ekstrak identitas pegawai dari summary / row agar hitungan duplikat per pegawai, bukan global semua bawahan
+ for(const row of unique){
+  const match = (row.summary || '').match(/^\s*\d+\s+([A-Za-z\s,.]+?)(?:\s*,\s*NIP\s*(\d{18}))?\s*,\s*Tanggal Kegiatan\s*:/i) || (row.summary || '').match(/^\s*\d+\s+([^,]+)/i);
+  row.employeeKey = match ? (match[2] || match[1].trim().toLowerCase()) : 'unknown';
+  row.employeeName = match ? match[1].trim() : '';
+ }
+ const counts=new Map();
+ for(const row of unique){
+  if(row.date){
+   const key = `${row.employeeKey}__${row.date}`;
+   counts.set(key, (counts.get(key) || 0) + 1);
+  }
+ }
  const valid=[],invalid=[];
- for(const row of unique){const issues=[];if(!row.date)issues.push('Tanggal kegiatan tidak terbaca');else if(counts.get(row.date)>1)issues.push(`Tanggal duplikat: ${row.date}`);const dow=row.date?new Date(row.date+'T12:00:00').getDay():null,minExpected=dow===5?'17:00':dow>=1&&dow<=4?'16:30':null;
+ for(const row of unique){
+  const issues=[];
+  const key = `${row.employeeKey}__${row.date}`;
+  if(!row.date)issues.push('Tanggal kegiatan tidak terbaca');
+  else if(counts.get(key)>1)issues.push(`Tanggal duplikat untuk pegawai ini: ${row.date}`);const dow=row.date?new Date(row.date+'T12:00:00').getDay():null,minExpected=dow===5?'17:00':dow>=1&&dow<=4?'16:30':null;
 if(!row.activities.length)issues.push('Rincian kegiatan tidak terbaca');
 else if(minExpected){
   const lastEnd=row.activities.at(-1).end;
